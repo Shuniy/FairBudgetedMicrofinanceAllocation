@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import argparse
-import sys
+import os
 from pathlib import Path
 
 import matplotlib.pyplot as plt
@@ -20,11 +20,6 @@ from evaluate import compare_policies
 from models.arm_spec import ArmSpec
 from models.environment_config import EnvironmentConfig
 
-# Allow `python experiments/run_phase1.py` from the project root.
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
-if str(PROJECT_ROOT) not in sys.path:
-    sys.path.insert(0, str(PROJECT_ROOT))
-
 
 def build_policy_factories(arms: list[ArmSpec], target_shares: dict[str, float]):
     arm_groups = [arm.group for arm in arms]
@@ -34,7 +29,7 @@ def build_policy_factories(arms: list[ArmSpec], target_shares: dict[str, float])
         "epsilon_greedy": lambda n, seed: EpsilonGreedyPolicy(
             n, epsilon=0.10, seed=seed
         ),
-        "ucb1": lambda n, seed: UCBPolicy(n, seed=seed),
+        "ucb": lambda n, seed: UCBPolicy(n, seed=seed),
         "thompson": lambda n, seed: ThompsonSamplingPolicy(n, seed=seed),
         "epsilon_first": lambda n, seed: EpsilonFirstPolicy(
             n, exploration_budget_fraction=0.20, seed=seed
@@ -96,7 +91,7 @@ def plot_metric_over_time(
 def main() -> None:
     parser = argparse.ArgumentParser(description="Run Phase-1 bandit experiments")
     parser.add_argument("--seeds", type=int, default=20)
-    parser.add_argument("--output", type=Path, default=PROJECT_ROOT / "outputs")
+    parser.add_argument("--output", type=Path, default=os.getcwd() + "/outputs")
     args = parser.parse_args()
 
     args.output.mkdir(parents=True, exist_ok=True)

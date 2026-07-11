@@ -1,35 +1,66 @@
 from dataclasses import dataclass, field
-from typing import Optional
 
-import numpy as np
-
-from Helpers.enums import Gender, IncomeGroup, ProtectedGroup, RegionType
+from Helpers.enums import Gender, IncomeGroup, ProtectedGroup, Region, RegionType
 from models.application_context import ApplicationContext
 
 
-@dataclass
+@dataclass(slots=True)
 class Borrower:
-    def __init__(self, application: ApplicationContext) -> None:
-        self.application_context: ApplicationContext = application
 
-        self.id: str = self.application_context.applicant_id
-        self.name: str = self.application_context.name
-        self.age: int = self.application_context.age
-        self.gender = self.application_context.gender
-        self.income: float = self.application_context.income
-        self.region_name: str = self.application_context.region_name
-        self.region = self.application_context.region
-        self.loan_purpose = self.application_context.loan_purpose
-        self.sector = self.application_context.sector
-        self.region_type = self.application_context.region_type
-        self.repeated_borrower: bool = self.application_context.repeated_borrower
-        self.urgent_need: bool = self.application_context.urgent_need
+    application_context: ApplicationContext
+    protected_groups: set[ProtectedGroup] = field(init=False)
+    income_group: IncomeGroup = field(init=False)
+    socially_marginalized: bool = field(init=False)
+    geographically_isolated: bool = field(init=False)
+    poverty_relief_score: float = field(init=False)
+    vulnerability_score: float = field(init=False)
+
+    id: str = field(init=False)
+    name: str = field(init=False)
+    age: int = field(init=False)
+    gender: Gender = field(init=False)
+    income: float = field(init=False)
+    region_name: str = field(init=False)
+    region: Region = field(init=False)
+    loan_purpose: object = field(init=False)
+    sector: object = field(init=False)
+    region_type: RegionType = field(init=False)
+    repeated_borrower: bool = field(init=False)
+    urgent_need: bool = field(init=False)
+
+    def __post_init__(self) -> None:
+        application = self.application_context
+        self.id = application.applicant_id
+        self.name = application.name
+        self.age = application.age
+        self.gender = application.gender
+        self.income = application.income
+        self.region_name = application.region_name
+        self.region = application.region
+        self.loan_purpose = application.loan_purpose
+        self.sector = application.sector
+        self.region_type = application.region_type
+        self.repeated_borrower = application.repeated_borrower
+        self.urgent_need = application.urgent_need
+        self.calculate_scores_features()
+
+    @property
+    def requested_loan_amount(self) -> float:
+        return self.application_context.requested_loan_amount
+
+    @property
+    def existing_debt(self) -> float:
+        return self.application_context.existing_debt
+
+    @property
+    def previous_repayment_rate(self) -> float:
+        return self.previous_repayment_rate
 
     def is_geographically_isolated(self) -> bool:
-        return self.region_type in [RegionType.ISOLATED, RegionType.RURAL]
+        return self.region_type in {RegionType.ISOLATED, RegionType.RURAL}
 
-    def find_protected_groups(self):
-        groups = set()
+    def find_protected_groups(self) -> set[ProtectedGroup]:
+        groups: set[ProtectedGroup] = set()
         if self.gender == Gender.FEMALE:
             groups.add(ProtectedGroup.WOMEN)
         if self.application_context.disability:
@@ -40,16 +71,15 @@ class Borrower:
             groups.add(ProtectedGroup.MINORITY)
         if self.application_context.reserved_by_government:
             groups.add(ProtectedGroup.RESERVED)
+        if not groups:
+            groups.add(ProtectedGroup.NONE)
         return groups
 
     def is_socially_marginalized(self) -> bool:
-        return (
-            len(
-                self.protected_groups.intersection(
-                    {ProtectedGroup.RESERVED, ProtectedGroup.MINORITY}
-                )
+        return bool(
+            self.protected_groups.intersection(
+                {ProtectedGroup.RESERVED, ProtectedGroup.MINORITY}
             )
-            > 0
         )
 
     def find_income_group(self) -> IncomeGroup:
@@ -67,17 +97,53 @@ class Borrower:
         else:
             return IncomeGroup.HIGH
 
-    def calculate_scores_features(self):
+    def calculate_scores_features(self) -> None:
         self.protected_groups = self.find_protected_groups()
         self.income_group = self.find_income_group()
-        self.socially_marginalized: Optional[bool] = self.is_socially_marginalized()
-        self.geographically_isolated: Optional[bool] = self.is_geographically_isolated()
+        self.socially_marginalized = self.is_socially_marginalized()
+        self.geographically_isolated = self.is_geographically_isolated()
+        self.poverty_relief_score = self.calculate_poverty_relief_score()
+        self.vulnerability_score = self.calculate_vulnerability_score()
 
-        # self.poverty_relief_score: Optional[float] = self.is_poverty_relief_eligible()
-        # self.social_impact_score: Optional[float] = self.calculate_social_impact_score()
-        # self.indebtedness_risk_score: Optional[float] = (
-        #     self.calculate_indebtedness_risk_score()
-        # )
-        # self.priority_weight: Optional[float] = self.calculate_priority_weight()
-        # self.historical_repayment_proxy: Optional[float] = None
-        # self.vulnerability_score: Optional[float] = None
+    def calculate_poverty_relief_score(self) -> float:
+        income_need = 1.0 - min(self.income / 150_000.0, 1.0)
+        geographic_need = 0.15 if self.is_geographically_isolated() else 0.0
+        marginalization_need = 0.20 if self.is_socially_marginalized() else 0.0
+        disability_need = 0.10 if self.application_context.disability else 0.0
+        urgency_need = 0.10 if self.urgent_need else 0.0
+        dependant_need = min(self.application_context.dependants / 8.0, 1.0) * 0.10
+        return float(
+            min(
+                1.0,
+                0.55 * income_need
+                + geographic_need
+                + marginalization_need
+                + disability_need
+                + urgency_need
+                + dependant_need,
+            )
+        )
+
+    def calculate_vulnerability_score(self) -> float:
+        protected_count = len(self.protected_groups - {ProtectedGroup.NONE})
+        return float(
+            min(
+                1.0,
+                0.60 * self.poverty_relief_score
+                + 0.10 * min(protected_count, 3)
+                + (0.10 if self.geographically_isolated else 0.0),
+            )
+        )
+
+    def primary_fairness_group(self) -> str:
+        priority = (
+            ProtectedGroup.DISABLED,
+            ProtectedGroup.RESERVED,
+            ProtectedGroup.MINORITY,
+            ProtectedGroup.WOMEN,
+            ProtectedGroup.AGED,
+        )
+        for group in priority:
+            if group in self.protected_groups:
+                return group.value
+        return ProtectedGroup.NONE.value

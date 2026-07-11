@@ -11,7 +11,7 @@ from Environments.synthetic_environment_bandits import SyntheticEnvironment
 from models.arm_spec import ArmSpec
 from models.environment_config import EnvironmentConfig
 
-from .metrics import (
+from metrics import (
     allocation_shares,
     budget_utilization,
     demographic_parity_gap,

@@ -2,16 +2,14 @@ from dataclasses import dataclass
 
 from Helpers.enums import (
     Gender,
-    IncomeGroup,
     LoanPurpose,
-    ProtectedGroup,
     Region,
     RegionType,
     SectorType,
 )
 
 
-@dataclass
+@dataclass(frozen=True, slots=True)
 class ApplicationContext:
     """
     These are borrower/application features
@@ -46,6 +44,9 @@ class ApplicationContext:
     marginalized_community: bool  # is the borrower from a minority group
     married: bool  # is the borrower married
     reserved_by_government: bool  # is the borrower from a government reserved category
+    dependants: int # has dependants or not
+    existing_debt: float # existing debt amount
+    requested_loan_amount: float # amount requested
 
     # Socio-economic / protected attributes
     urgent_need: bool  # e.g. urgent need for loan

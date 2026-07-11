@@ -1,6 +1,4 @@
 from enum import Enum
-from subprocess import STARTF_USESHOWWINDOW
-from tkinter.constants import DISABLED
 
 """
 Application Enums
@@ -25,12 +23,14 @@ class LoanPurpose(Enum):
     EDUCATION = "education"
     HEALTHCARE = "healthcare"
     EMERGENCY = "emergency"
+    HOUSING = "housing"
     OTHER = "other"
 
 
 class RegionType(Enum):
     URBAN = "urban"
     RURAL = "rural"
+    SEMI_URBAN = "semi_urban"
     ISOLATED = "isolated"
 
 
@@ -55,6 +55,7 @@ class ProtectedGroup(Enum):
     WOMEN = "women"  # women
     DISABLED = "disabled"  # disabled people
     AGED = "aged"  # aged people
+    NONE = "none"  # not belonging to any protected group
 
 
 class Region(Enum):
