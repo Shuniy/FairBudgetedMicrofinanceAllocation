@@ -1,11 +1,16 @@
+from __future__ import annotations
+
 from dataclasses import dataclass
+from pathlib import Path
 
 
-@dataclass
+@dataclass(frozen=True, slots=True)
 class ExperimentConfig:
-    num_seeds: int = 10
-    log_every_round: bool = True
+    """Configuration parameters for the experiment."""
+    seeds: int = 10
+    output: Path = Path("outputs")
     save_curves: bool = True
-    compute_demographic_parity: bool = True
-    compute_quota_satisfaction: bool = True
-    compute_equal_opportunity_proxy: bool = False
+
+    def __post_init__(self) -> None:
+        if self.seeds <= 0:
+            raise ValueError("seeds must be positive")

@@ -1,52 +1,49 @@
+from __future__ import annotations
+
 from dataclasses import dataclass
 
-from Helpers.enums import (
-    Gender,
-    LoanPurpose,
-    Region,
-    RegionType,
-    SectorType,
-)
+from Helpers.enums import Gender, LoanPurpose, Region, RegionType, Sector
 
 
 @dataclass(frozen=True, slots=True)
 class ApplicationContext:
-    """
-    These are borrower/application features
-    features like:
-
-    low income
-    socially marginalized
-    geographically isolated
-    poverty alleviation
-    social impact
-    indebtedness risk
-    """
+    """information available when a loan application arrives. usually filled by applicant"""
 
     applicant_id: str
-    age: int  # age of the borrower
-    name: str  # name of the borrower
-    disability: bool  # is the borrower disabled
-    medical_condition: bool  # does the borrower have a medical condition
+    name: str
+    age: int
+    gender: Gender # will be used to determine if the applicant is part of a protected group
+    income: float # will be used to determine if the applicant is part of a protected group
+    region_name: str
+    region: str | Region
+    loan_purpose: LoanPurpose # will be used to determine if the applicant is part of a protected group
+    sector: Sector # will be used to determine if the applicant is part of a protected group
+    region_type: RegionType
+    repeated_borrower: bool # might use in cmdp or not sure about it yet
+    urgent_need: bool # can be used in context, might be used in cmdp or not sure about it yet
+    requested_loan_amount: float
+    existing_debt: float
+    previous_repayment_rate: float # can be used, but not sure to put it here, should be in borrower
+    dependants: int = 0
+    disability: bool = False # can be used to determine if the applicant is part of a protected group
+    marginalized_community: bool = False # can be used to determine if the applicant is part of a protected group
+    reserved_by_government: bool = False # can be used to determine if the applicant is part of a protected group
+    medical_condition: bool = False # can be used to determine if the applicant is part of a protected group
+    married: bool = False # dont know what to do with it
 
-    # Core lending/application fields
-    # requested_loan_amount: float  # loan amount requested by the borrower
-    loan_purpose: LoanPurpose  # e.g. startup, working capital, business expansion
-    sector: (
-        SectorType  # e.g. agriculture, manufacturing, services, retail, personal, other
-    )
-    income: float  # annual income of the borrower // Taking GBP for reference, should be converted to local currency
-    region_name: str  # e.g. city, town, village name
-    region: Region  # north, south, east, west, central
-    region_type: RegionType  # e.g. urban, rural, isolated
-    repeated_borrower: bool  # has the borrower applied before
-    gender: Gender
-    marginalized_community: bool  # is the borrower from a minority group
-    married: bool  # is the borrower married
-    reserved_by_government: bool  # is the borrower from a government reserved category
-    dependants: int # has dependants or not
-    existing_debt: float # existing debt amount
-    requested_loan_amount: float # amount requested
-
-    # Socio-economic / protected attributes
-    urgent_need: bool  # e.g. urgent need for loan
+    def __post_init__(self) -> None:
+        """validate the application context"""
+        if not self.applicant_id.strip():
+            raise ValueError("applicant_id cannot be empty")
+        if not 18 <= self.age <= 100:
+            raise ValueError("age must be between 18 and 100")
+        if self.income <= 0:
+            raise ValueError("income must be strictly positive")
+        if self.requested_loan_amount <= 0:
+            raise ValueError("requested_loan_amount must be strictly positive")
+        if self.existing_debt < 0:
+            raise ValueError("existing_debt cannot be negative")
+        if not 0.0 <= self.previous_repayment_rate <= 1.0:
+            raise ValueError("previous_repayment_rate must be in [0, 1]")
+        if self.dependants < 0:
+            raise ValueError("dependants cannot be negative")

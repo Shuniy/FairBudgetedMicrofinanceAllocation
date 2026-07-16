@@ -1,12 +1,12 @@
+from __future__ import annotations
 import numpy as np
-from Algorithms.bandit import BanditPolicy
-from Environments.synthetic_environment_bandits import SyntheticEnvironment
 
-class OracleRewardPerCostPolicy(BanditPolicy):
+from Algorithms.bandit import BanditPolicy
+from Environments.base_environment import BanditEnvironment
+
+class TrueRewardPerCostPolicy(BanditPolicy):
     """Evaluation-only policy that knows the true repayment probabilities."""
 
-    def scores(self, env: SyntheticEnvironment) -> np.ndarray:
-        probabilities = np.asarray(
-            [arm.repayment_probability for arm in env.arms], dtype=float
-        )
-        return probabilities / env.current_costs
+    def scores(self, env: BanditEnvironment) -> np.ndarray:
+        """Compute the true reward per cost for each action."""
+        return env.true_probabilities() / env.current_costs()

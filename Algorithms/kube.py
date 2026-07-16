@@ -1,19 +1,14 @@
 from collections import Counter
-from typing import Sequence
+from collections.abc import Sequence
 
 import numpy as np
 
 from Algorithms.ucb import UCBPolicy
-from Environments.synthetic_environment_bandits import SyntheticEnvironment
+from Environments.base_environment import BanditEnvironment
 
 
 class KUBEPolicy(UCBPolicy):
     """Small unbounded-knapsack KUBE-style policy.
-
-    This implementation is intended for integer or near-integer deterministic
-    costs. It solves an unbounded knapsack over the remaining budget using UCB
-    reward estimates, then samples an arm in proportion to the recovered item
-    counts. For stochastic costs, use FractionalKUBEPolicy or BudgetedUCBPolicy.
     """
 
     def __init__(
@@ -28,15 +23,17 @@ class KUBEPolicy(UCBPolicy):
         self.cost_scale = cost_scale
         super().__init__(n_arms, exploration_coefficient, seed)
 
-    def scores(self, env: SyntheticEnvironment) -> np.ndarray:
+    def scores(self, env: BanditEnvironment) -> np.ndarray:
+        """Compute the KUBE scores for each arm based on observed rewards and counts."""
         # Used only by wrappers. The direct KUBE action selection is below.
-        return super().scores(env) / env.current_costs
+        return super().scores(env) / env.current_costs()
 
     def select_action(
         self,
-        env: SyntheticEnvironment,
+        env: BanditEnvironment,
         candidates: Sequence[int] | None = None,
     ) -> int:
+        """Select an action based on the KUBE policy."""
         feasible = list(env.feasible_actions() if candidates is None else candidates)
         feasible = [action for action in feasible if action in env.feasible_actions()]
         if not feasible:
@@ -48,7 +45,7 @@ class KUBEPolicy(UCBPolicy):
 
         budget_units = int(np.floor(env.remaining_budget * self.cost_scale + 1e-9))
         costs = {
-            action: max(1, int(round(env.current_costs[action] * self.cost_scale)))
+            action: max(1, int(round(env.current_costs()[action] * self.cost_scale)))
             for action in feasible
         }
         values = super().scores(env)

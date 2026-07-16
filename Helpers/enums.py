@@ -1,40 +1,17 @@
+from __future__ import annotations
+
 from enum import Enum
 
-"""
-Application Enums
-"""
 
-
-class SectorType(Enum):
-    AGRICULTURE = "agriculture"
-    MANUFACTURING = "manufacturing"
-    SERVICES = "services"
-    RETAIL = "retail"
-    PERSONAL = "personal"
+class Gender(str, Enum):
+    """gender options."""
+    MALE = "male"
+    FEMALE = "female"
     OTHER = "other"
 
 
-class LoanPurpose(Enum):
-    STARTUP = "startup"
-    WORKING_CAPITAL = "working_capital"
-    BUSINESS_EXPANSION = "business_expansion"
-    EQUIPMENT_PURCHASE = "equipment_purchase"
-    REFINANCING = "refinancing"
-    EDUCATION = "education"
-    HEALTHCARE = "healthcare"
-    EMERGENCY = "emergency"
-    HOUSING = "housing"
-    OTHER = "other"
-
-
-class RegionType(Enum):
-    URBAN = "urban"
-    RURAL = "rural"
-    SEMI_URBAN = "semi_urban"
-    ISOLATED = "isolated"
-
-
-class IncomeGroup(Enum):
+class IncomeGroup(str, Enum):
+    """income group options."""
     VERY_LOW = "very_low"
     LOW = "low"
     LOWER_MIDDLE = "lower_middle"
@@ -43,24 +20,51 @@ class IncomeGroup(Enum):
     HIGH = "high"
 
 
-class Gender(Enum):
-    MALE = "male"
-    FEMALE = "female"
-    OTHER = "other"
+class ProtectedGroup(str, Enum):
+    """protected group options."""
+    WOMEN = "women"
+    DISABLED = "disabled"
+    AGED = "aged"
+    MINORITY = "minority"
+    RESERVED = "reserved"
+    NONE = "none"
 
 
-class ProtectedGroup(Enum):
-    RESERVED = "reserved"  # such as tribal people etc
-    MINORITY = "minority"  # such as religious minorities, transgender, immigrants etc
-    WOMEN = "women"  # women
-    DISABLED = "disabled"  # disabled people
-    AGED = "aged"  # aged people
-    NONE = "none"  # not belonging to any protected group
+class RegionType(str, Enum):
+    """region type options."""
+    URBAN = "urban"
+    SEMI_URBAN = "semi_urban"
+    RURAL = "rural"
+    ISOLATED = "isolated"
 
 
-class Region(Enum):
+class Region(str, Enum):
+    """region options."""
     NORTH = "north"
     SOUTH = "south"
     EAST = "east"
     WEST = "west"
     CENTRAL = "central"
+
+
+class LoanPurpose(str, Enum):
+    """loan purpose options."""
+    BUSINESS = "business"
+    AGRICULTURE = "agriculture"
+    EDUCATION = "education"
+    HEALTH = "health"
+    HOUSING = "housing"
+    OTHER = "other"
+
+
+class Sector(str, Enum):
+    """sector options."""
+    AGRICULTURE = "agriculture"
+    RETAIL = "retail"
+    SERVICES = "services"
+    MANUFACTURING = "manufacturing"
+    OTHER = "other"
+
+
+# Backward-compatible name used by the original parent models.
+SectorType = Sector

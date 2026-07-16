@@ -1,10 +1,11 @@
 import numpy as np
 
 from Algorithms.bandit import BanditPolicy
-from Environments.synthetic_environment_bandits import SyntheticEnvironment
+from Environments.base_environment import BanditEnvironment
 
 
 class UCBPolicy(BanditPolicy):
+    """Upper Confidence Bound (UCB) policy for multi-armed bandit problems."""
     def __init__(
         self, n_arms: int, exploration_coefficient: float = 2.0, seed: int = 0
     ) -> None:
@@ -13,7 +14,8 @@ class UCBPolicy(BanditPolicy):
         self.exploration_coefficient = exploration_coefficient
         super().__init__(n_arms=n_arms, seed=seed)
 
-    def scores(self, env: SyntheticEnvironment) -> np.ndarray:
+    def scores(self, env: BanditEnvironment) -> np.ndarray:
+        """Compute the UCB scores for each arm based on observed rewards and counts."""
         scores = np.full(self.n_arms, np.inf, dtype=float)
         sampled = self.counts > 0
         if np.any(sampled):
