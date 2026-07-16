@@ -30,7 +30,7 @@ class BanditEnvironment:
         encoder: BorrowerFeatureEncoder | None = None,
     ) -> None:
         """Initialize the bandit environment."""
-        if mode == "arm":
+        if mode == BanditMode.ARM:
             if isinstance(config, ContextualEnvironmentConfig):
                 raise TypeError("arm mode requires EnvironmentConfig")
             if not arms:
@@ -103,7 +103,7 @@ class BanditEnvironment:
 
     @property
     def n_arms(self) -> int:
-        if self.mode != "arm":
+        if self.mode != BanditMode.ARM:
             raise TypeError("n_arms is only available in arm mode")
         return len(self.arms)
 
@@ -117,7 +117,7 @@ class BanditEnvironment:
     @property
     def groups(self) -> tuple[str, ...]:
         """Get the unique fairness groups present in the environment."""
-        if self.mode == "arm":
+        if self.mode == BanditMode.ARM:
             return tuple(dict.fromkeys(arm.group for arm in self.arms))
         return tuple(dict.fromkeys(self.current_groups()))
 
@@ -134,7 +134,7 @@ class BanditEnvironment:
         self.history = []
         self.pending_feedback = []
 
-        if self.mode == "arm":
+        if self.mode == BanditMode.ARM:
             self.arm_allocation_counts = np.zeros(self.n_arms, dtype=int)
             self.group_funding_counts = defaultdict(
                 int, {group: 0 for group in self.groups}
@@ -175,7 +175,7 @@ class BanditEnvironment:
 
     def current_costs(self) -> np.ndarray:
         """Get the current costs for each action (arm or borrower)."""
-        if self.mode == "arm":
+        if self.mode == BanditMode.ARM:
             return self._current_costs
         return np.asarray(
             [candidate.cost for candidate in self.current_pool], dtype=float
@@ -183,13 +183,13 @@ class BanditEnvironment:
 
     def current_groups(self) -> tuple[str, ...]:
         """Get the fairness groups for the current actions (arms or borrowers)."""
-        if self.mode == "arm":
+        if self.mode == BanditMode.ARM:
             return tuple(arm.group for arm in self.arms)
         return tuple(candidate.fairness_group for candidate in self.current_pool)
 
     def current_contexts(self) -> np.ndarray | None:
         """Get the context matrix for the current borrower pool. Returns None in arm mode."""
-        if self.mode == "arm":
+        if self.mode == BanditMode.ARM:
             return None
         return np.vstack([candidate.context for candidate in self.current_pool])
 
@@ -202,7 +202,7 @@ class BanditEnvironment:
 
     def true_probabilities(self) -> np.ndarray:
         """Get the true repayment probabilities for the current actions (arms or borrowers)."""
-        if self.mode == "arm":
+        if self.mode == BanditMode.ARM:
             return np.asarray(
                 [arm.repayment_probability for arm in self.arms], dtype=float
             )
@@ -227,7 +227,7 @@ class BanditEnvironment:
     def _record_current_opportunities(self) -> None:
         """Record the current opportunities for each fairness group based on feasible actions."""
         feasible = self.feasible_actions()
-        if self.mode == "arm":
+        if self.mode == BanditMode.ARM:
             for group in {self.arms[index].group for index in feasible}:
                 self.group_opportunity_counts[group] += 1
             return
@@ -249,7 +249,7 @@ class BanditEnvironment:
             "group_funding_counts": dict(self.group_funding_counts),
             "group_opportunity_counts": dict(self.group_opportunity_counts),
         }
-        if self.mode == "arm":
+        if self.mode == BanditMode.ARM:
             observation["arm_allocation_counts"] = self.arm_allocation_counts.copy()
         else:
             observation["contexts"] = self.context_matrix().copy()
@@ -279,7 +279,7 @@ class BanditEnvironment:
         self, action: int
     ) -> tuple[str, str, float, np.ndarray | None, dict[str, Any]]:
         """Get the details of the selected action, including identifier, group, repayment probability, context, and metadata."""
-        if self.mode == "arm":
+        if self.mode == BanditMode.ARM:
             arm = self.arms[action]
             return (
                 arm.name,
@@ -309,7 +309,7 @@ class BanditEnvironment:
         if action < 0 or action >= self.n_actions:
             raise IndexError(f"Invalid action {action}")
         if action not in self.feasible_actions():
-            if self.mode == "arm":
+            if self.mode == BanditMode.ARM:
                 raise ValueError("Selected arm is not affordable")
             raise ValueError("Selected borrower is not affordable")
 
@@ -319,13 +319,13 @@ class BanditEnvironment:
         cost = float(self.current_costs()[action])
         reward = float(self.rng.binomial(1, probability))
         self.remaining_budget = max(0.0, self.remaining_budget - cost)
-        if self.mode == "arm":
+        if self.mode == BanditMode.ARM:
             self.arm_allocation_counts[action] += 1
         self.group_funding_counts[group] += 1
         funding_snapshot = dict(self.group_funding_counts)
         opportunity_snapshot = dict(self.group_opportunity_counts)
 
-        if self.mode == "arm":
+        if self.mode == BanditMode.ARM:
             observed = (
                 FeedbackEvent(
                     due_round=self.round_index,
@@ -362,7 +362,7 @@ class BanditEnvironment:
             }
         )
         self.round_index += 1
-        if self.mode == "arm":
+        if self.mode == BanditMode.ARM:
             self._current_costs = self._sample_arm_costs()
         elif self.round_index < self.config.max_rounds:
             self.current_pool = self.generator.generate_pool(
