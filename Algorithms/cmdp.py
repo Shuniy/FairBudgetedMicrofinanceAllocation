@@ -191,6 +191,40 @@ class PortfolioAwareLinUCBPolicy(ContextOnlyBudgetedLinUCBPolicy):
         return optimistic - self.capital_shadow_price(env) * (costs / median_cost)
 
 
+class PortfolioAwareEpsilonGreedyPolicy(PortfolioAwareLinUCBPolicy):
+    """Portfolio-aware ridge learner with epsilon-greedy exploration."""
+
+    def __init__(
+        self,
+        n_features: int,
+        epsilon: float = 0.10,
+        base_shadow_price: float = 0.22,
+        liquidity_weight: float = 1.40,
+        due_soon_relief: float = 0.80,
+        default_loss_weight: float = 0.60,
+        regularization: float = 1.0,
+        seed: int = 0,
+    ) -> None:
+        if not 0.0 <= epsilon <= 1.0:
+            raise ValueError("epsilon must be in [0, 1]")
+        self.epsilon = epsilon
+        super().__init__(
+            n_features=n_features,
+            alpha=0.0,
+            base_shadow_price=base_shadow_price,
+            liquidity_weight=liquidity_weight,
+            due_soon_relief=due_soon_relief,
+            default_loss_weight=default_loss_weight,
+            regularization=regularization,
+            seed=seed,
+        )
+
+    def scores(self, env: StatefulMicrofinanceCMDPEnv) -> np.ndarray:
+        if self.rng.random() < self.epsilon:
+            return self.rng.random(len(env.current_pool))
+        return super().scores(env)
+
+
 class PortfolioAwareThompsonPolicy(CMDPPolicy):
     def __init__(
         self,

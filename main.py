@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 from collections.abc import Mapping, Sequence
+from dataclasses import asdict
 from pathlib import Path
 
 from Algorithms.bandit import RandomPolicy
@@ -11,6 +12,7 @@ from Algorithms.cmdp import (
     HardFairCMDPPolicy,
     LagrangianFairCMDPPolicy,
     OraclePortfolioPolicy,
+    PortfolioAwareEpsilonGreedyPolicy,
     PortfolioAwareLinUCBPolicy,
     PortfolioAwareThompsonPolicy,
     RandomCMDPPolicy,
@@ -41,8 +43,12 @@ from evaluate import (
     compare_cmdp_policies,
     compare_policies,
     display_results,
+    rank_results,
+    save_combined_report,
     save_cmdp_results,
+    save_evaluation_report,
     save_results,
+    winner_summary,
 )
 from models.environment_config import (
     CMDPEnvironmentConfig,
@@ -69,6 +75,9 @@ DEFAULT_TARGET_SHARES = {
     "minority": 0.12,
     "women": 0.25,
 }
+
+CONTEXTUAL_PARITY_TOLERANCE = 0.010
+QUOTA_TOLERANCE = 0.01
 
 
 def build_arm_policy_factories(target_shares: dict[str, float]):
@@ -148,17 +157,49 @@ def build_contextual_policy_factories(target_shares: dict[str, float]):
         "budgeted_contextual_thompson": lambda env, seed: ContextualThompsonSamplingPolicy(
             dimensions(env), posterior_scale=0.30, budget_aware=True, seed=seed
         ),
+        "fair_epsilon_greedy_hard": lambda env, seed: HardFairPolicy(
+            ContextualEpsilonGreedyPolicy(
+                dimensions(env), epsilon=0.10, budget_aware=True, seed=seed
+            ),
+            target_shares,
+            parity_tolerance=CONTEXTUAL_PARITY_TOLERANCE,
+            seed=seed,
+        ),
+        "fair_epsilon_greedy_soft": lambda env, seed: SoftFairPolicy(
+            ContextualEpsilonGreedyPolicy(
+                dimensions(env), epsilon=0.10, budget_aware=True, seed=seed
+            ),
+            target_shares,
+            penalty_lambda=0.015,
+            seed=seed,
+        ),
         "fair_linucb_hard": lambda env, seed: HardFairPolicy(
             LinUCBPolicy(
                 dimensions(env), alpha=0.70, budget_aware=True, seed=seed
             ),
             target_shares,
-            parity_tolerance=0.010,
+            parity_tolerance=CONTEXTUAL_PARITY_TOLERANCE,
             seed=seed,
         ),
         "fair_linucb_soft": lambda env, seed: SoftFairPolicy(
             LinUCBPolicy(
                 dimensions(env), alpha=0.70, budget_aware=True, seed=seed
+            ),
+            target_shares,
+            penalty_lambda=0.015,
+            seed=seed,
+        ),
+        "fair_thompson_hard": lambda env, seed: HardFairPolicy(
+            ContextualThompsonSamplingPolicy(
+                dimensions(env), posterior_scale=0.30, budget_aware=True, seed=seed
+            ),
+            target_shares,
+            parity_tolerance=CONTEXTUAL_PARITY_TOLERANCE,
+            seed=seed,
+        ),
+        "fair_thompson_soft": lambda env, seed: SoftFairPolicy(
+            ContextualThompsonSamplingPolicy(
+                dimensions(env), posterior_scale=0.30, budget_aware=True, seed=seed
             ),
             target_shares,
             penalty_lambda=0.015,
@@ -179,7 +220,7 @@ def build_cmdp_policy_factories(
     lagrangian_config = LagrangianConfig(
         target_shares=target_shares,
         parity_tolerance=parity_tolerance,
-        quota_tolerance=0.01,
+        quota_tolerance=QUOTA_TOLERANCE,
         dual_learning_rate=0.20,
         initial_lambda_quota=0.20,
         initial_lambda_parity=0.20,
@@ -193,6 +234,14 @@ def build_cmdp_policy_factories(
         "context_only_budgeted_linucb": (
             lambda dimensions, seed: ContextOnlyBudgetedLinUCBPolicy(
                 dimensions, alpha=0.70, seed=seed
+            )
+        ),
+        "portfolio_epsilon_greedy": (
+            lambda dimensions, seed: PortfolioAwareEpsilonGreedyPolicy(
+                dimensions,
+                epsilon=0.10,
+                base_shadow_price=0.22,
+                seed=seed,
             )
         ),
         "portfolio_linucb": lambda dimensions, seed: PortfolioAwareLinUCBPolicy(
@@ -209,7 +258,30 @@ def build_cmdp_policy_factories(
                 seed=seed,
             )
         ),
-        "cmdp_fair_hard": lambda dimensions, seed: HardFairCMDPPolicy(
+        "cmdp_fair_hard_epsilon_greedy": lambda dimensions, seed: HardFairCMDPPolicy(
+            base_policy=PortfolioAwareEpsilonGreedyPolicy(
+                dimensions,
+                epsilon=0.10,
+                base_shadow_price=0.22,
+                seed=seed,
+            ),
+            target_shares=target_shares,
+            parity_tolerance=parity_tolerance,
+            seed=seed,
+        ),
+        "cmdp_fair_lagrangian_epsilon_greedy": (
+            lambda dimensions, seed: LagrangianFairCMDPPolicy(
+                base_policy=PortfolioAwareEpsilonGreedyPolicy(
+                    dimensions,
+                    epsilon=0.10,
+                    base_shadow_price=0.22,
+                    seed=seed,
+                ),
+                config=lagrangian_config,
+                seed=seed,
+            )
+        ),
+        "cmdp_fair_hard_linucb": lambda dimensions, seed: HardFairCMDPPolicy(
             base_policy=PortfolioAwareLinUCBPolicy(
                 dimensions,
                 alpha=0.70,
@@ -220,11 +292,34 @@ def build_cmdp_policy_factories(
             parity_tolerance=parity_tolerance,
             seed=seed,
         ),
-        "cmdp_fair_lagrangian": (
+        "cmdp_fair_lagrangian_linucb": (
             lambda dimensions, seed: LagrangianFairCMDPPolicy(
                 base_policy=PortfolioAwareLinUCBPolicy(
                     dimensions,
                     alpha=0.70,
+                    base_shadow_price=0.22,
+                    seed=seed,
+                ),
+                config=lagrangian_config,
+                seed=seed,
+            )
+        ),
+        "cmdp_fair_hard_thompson": lambda dimensions, seed: HardFairCMDPPolicy(
+            base_policy=PortfolioAwareThompsonPolicy(
+                dimensions,
+                posterior_scale=0.30,
+                base_shadow_price=0.22,
+                seed=seed,
+            ),
+            target_shares=target_shares,
+            parity_tolerance=parity_tolerance,
+            seed=seed,
+        ),
+        "cmdp_fair_lagrangian_thompson": (
+            lambda dimensions, seed: LagrangianFairCMDPPolicy(
+                base_policy=PortfolioAwareThompsonPolicy(
+                    dimensions,
+                    posterior_scale=0.30,
                     base_shadow_price=0.22,
                     seed=seed,
                 ),
@@ -366,11 +461,12 @@ def run_contextual(
             encoder=encoder,
         )
 
+    seeds = list(range(args.seeds))
     summaries, trajectories = compare_policies(
         environment_factory,
         build_contextual_policy_factories(targets),
         targets,
-        list(range(args.seeds)),
+        seeds,
     )
     destination = output or args.output or Path("outputs") / "contextual"
     aggregate = save_results(
@@ -379,7 +475,31 @@ def run_contextual(
         destination,
         "contextual",
     )
-    display_results(aggregate, destination, "contextual")
+    ranked = save_evaluation_report(
+        aggregate=aggregate,
+        output=destination,
+        mode="contextual",
+        parity_tolerance=CONTEXTUAL_PARITY_TOLERANCE,
+        quota_tolerance=QUOTA_TOLERANCE,
+        seeds=seeds,
+        configuration={
+            "total_budget": budget,
+            "max_rounds": args.rounds,
+            "pool_size": args.pool_size,
+            "feedback_delay_rounds": args.feedback_delay,
+            "minimum_cost": 1.0,
+            "target_shares": targets,
+            "protected_attributes_in_prediction": False,
+        },
+        policy_parameters={
+            "epsilon": 0.10,
+            "linucb_alpha": 0.70,
+            "thompson_posterior_scale": 0.30,
+            "hard_parity_tolerance": CONTEXTUAL_PARITY_TOLERANCE,
+            "soft_penalty_lambda": 0.015,
+        },
+    )
+    display_results(aggregate, destination, "contextual", ranked)
     return aggregate
 
 
@@ -401,6 +521,7 @@ def run_cmdp(
         default_recovery_fraction=args.default_recovery,
         minimum_liquidity_reserve=args.liquidity_reserve,
     )
+    seeds = list(range(args.seeds))
     summaries, trajectories, funding_log, maturity_log = compare_cmdp_policies(
         env_config=config,
         policy_factories=build_cmdp_policy_factories(
@@ -409,7 +530,7 @@ def run_cmdp(
         ),
         target_shares=DEFAULT_TARGET_SHARES,
         parity_tolerance=args.parity_tolerance,
-        seeds=list(range(args.seeds)),
+        seeds=seeds,
         encoder=encoder,
     )
     destination = output or args.output or Path("outputs") / "cmdp"
@@ -420,7 +541,34 @@ def run_cmdp(
         maturity_log,
         destination,
     )
-    display_results(aggregate, destination, "cmdp")
+    ranked = save_evaluation_report(
+        aggregate=aggregate,
+        output=destination,
+        mode="cmdp",
+        parity_tolerance=args.parity_tolerance,
+        quota_tolerance=QUOTA_TOLERANCE,
+        seeds=seeds,
+        configuration={
+            **asdict(config),
+            "target_shares": DEFAULT_TARGET_SHARES,
+            "protected_attributes_in_prediction": False,
+        },
+        policy_parameters={
+            "epsilon": 0.10,
+            "linucb_alpha": 0.70,
+            "thompson_posterior_scale": 0.30,
+            "base_shadow_price": 0.22,
+            "lagrangian": {
+                "quota_tolerance": QUOTA_TOLERANCE,
+                "dual_learning_rate": 0.20,
+                "initial_lambda_quota": 0.20,
+                "initial_lambda_parity": 0.20,
+                "max_lambda": 8.0,
+                "warmup_rounds": 5,
+            },
+        },
+    )
+    display_results(aggregate, destination, "cmdp", ranked)
     return aggregate
 
 
@@ -480,6 +628,22 @@ def run_all(args: argparse.Namespace):
         if column in combined
     ]
     print(combined[display_columns].round(5).to_string(index=False))
+    ranked_results = {
+        "contextual": rank_results(
+            results["contextual"],
+            CONTEXTUAL_PARITY_TOLERANCE,
+            QUOTA_TOLERANCE,
+        ),
+        "cmdp": rank_results(
+            results["cmdp"],
+            args.parity_tolerance,
+            QUOTA_TOLERANCE,
+        ),
+    }
+    save_combined_report(ranked_results, output)
+    print("\nPhase winners (not compared across phases):\n")
+    print(winner_summary(ranked_results["contextual"], "contextual"))
+    print(winner_summary(ranked_results["cmdp"], "cmdp"))
     print(f"\nSaved combined results to: {output.resolve()}")
     return combined
 

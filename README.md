@@ -86,12 +86,24 @@ Phase 1/2 results are printed and written to `outputs/arm/` or
 - `aggregate_results.csv`
 - cumulative reward, repayment rate, parity gap, and quota satisfaction plots
 
+Contextual mode evaluates budget-aware epsilon-greedy, LinUCB, and contextual
+Thompson sampling under unconstrained, hard-fair, and soft-fair selection. The
+existing non-budgeted, random, and oracle policies remain as baselines.
+
 Phase 3 writes the same summary/trajectory/aggregate files under `outputs/cmdp/`,
 plus `funding_log.csv`, `maturity_log.csv`, and portfolio-state plots. All mode
 writes each phase beneath `outputs/all/` and adds
 `combined_aggregate_results.csv`. Rankings in that table are within each mode;
 raw reward and cost scales are not assumed to be directly comparable across
 different phase lifecycles.
+
+Contextual and CMDP runs also write `ranked_results.csv`, `winner_summary.txt`,
+`run_manifest.json`, and a bordered `report.html`. A policy qualifies as
+fairness-feasible when its mean parity gap and quota deficit meet their configured
+thresholds; feasible policies are ranked by reward per cost and cumulative reward.
+When none qualify, the report labels the minimum-violation result as the best
+compromise. CMDP mode applies the same unconstrained/hard/Lagrangian matrix to
+portfolio-aware epsilon-greedy, LinUCB, and Thompson sampling.
 
 ## Fairness and prediction
 

@@ -1,8 +1,12 @@
 from __future__ import annotations
 
+import json
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
+from html import escape
+from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
+import platform
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -88,6 +92,7 @@ def run_episode(
             "quota_satisfaction_rate": quota_satisfaction_rate(
                 result.funding_counts, targets
             ),
+            "total_quota_deficit": float(sum(deficits.values())),
             "observed_feedback_count": len(result.observed_feedback),
         }
         if result.true_repayment_probability is not None:
@@ -125,6 +130,9 @@ def run_episode(
             env.group_funding_counts, env.group_opportunity_counts
         ),
         "quota_satisfaction_rate": quota_satisfaction_rate(
+            env.group_funding_counts, targets
+        ),
+        "total_quota_deficit": total_quota_deficit(
             env.group_funding_counts, targets
         ),
         "pending_feedback": len(getattr(env, "pending_feedback", [])),
@@ -174,6 +182,7 @@ COMMON_METRICS = (
     "budget_utilization",
     "demographic_parity_gap",
     "quota_satisfaction_rate",
+    "total_quota_deficit",
 )
 
 
@@ -237,11 +246,21 @@ def save_results(
     return aggregate
 
 
-def display_results(aggregate: pd.DataFrame, output: Path, mode: str) -> None:
-    """Display the aggregate results in a readable format and indicate where the outputs were saved."""
+def display_results(
+    aggregate: pd.DataFrame,
+    output: Path,
+    mode: str,
+    ranked: pd.DataFrame | None = None,
+) -> None:
+    """Display aggregate or ranked results and indicate where outputs were saved."""
+
     label = f"{mode.title()} bandit" if mode in {"arm", "contextual"} else mode.upper()
     print(f"\n{label} aggregate results:\n")
-    print(aggregate.round(5).to_string())
+    if ranked is None:
+        print(aggregate.round(5).to_string())
+    else:
+        print(format_ranked_table(ranked, mode))
+        print(f"\n{winner_summary(ranked, mode)}")
     print(f"\nSaved outputs to: {output.resolve()}")
 
 
@@ -561,3 +580,306 @@ def save_cmdp_results(
                 "cmdp",
             )
     return aggregate
+
+
+def _flatten_aggregate(aggregate: pd.DataFrame) -> pd.DataFrame:
+    flattened = aggregate.copy()
+    if isinstance(flattened.columns, pd.MultiIndex):
+        flattened.columns = [
+            "_".join(str(part) for part in column if part)
+            for column in flattened.columns
+        ]
+    flattened = flattened.reset_index()
+    if "policy" not in flattened and len(flattened.columns):
+        flattened = flattened.rename(columns={flattened.columns[0]: "policy"})
+    return flattened
+
+
+def rank_results(
+    aggregate: pd.DataFrame,
+    parity_tolerance: float,
+    quota_tolerance: float = 0.01,
+) -> pd.DataFrame:
+    """Rank policies by fairness feasibility, reward efficiency, and reward."""
+
+    if not 0.0 <= parity_tolerance <= 1.0:
+        raise ValueError("parity_tolerance must be in [0, 1]")
+    if quota_tolerance < 0.0:
+        raise ValueError("quota_tolerance cannot be negative")
+    ranked = _flatten_aggregate(aggregate)
+    required = {
+        "policy",
+        "cumulative_reward_mean",
+        "reward_per_cost_mean",
+        "demographic_parity_gap_mean",
+        "total_quota_deficit_mean",
+    }
+    missing = sorted(required - set(ranked.columns))
+    if missing:
+        raise ValueError(f"aggregate results are missing ranking metrics: {missing}")
+
+    ranked["parity_excess"] = np.maximum(
+        0.0,
+        ranked["demographic_parity_gap_mean"] - parity_tolerance,
+    )
+    ranked["quota_excess"] = np.maximum(
+        0.0,
+        ranked["total_quota_deficit_mean"] - quota_tolerance,
+    )
+    ranked["fairness_violation"] = (
+        ranked["parity_excess"] + ranked["quota_excess"]
+    )
+    ranked["fairness_feasible"] = ranked["fairness_violation"] <= 1e-12
+    ranked["_feasibility_group"] = np.where(
+        ranked["fairness_feasible"], 0, 1
+    )
+    ranked["_violation_order"] = np.where(
+        ranked["fairness_feasible"], 0.0, ranked["fairness_violation"]
+    )
+    ranked = ranked.sort_values(
+        [
+            "_feasibility_group",
+            "_violation_order",
+            "reward_per_cost_mean",
+            "cumulative_reward_mean",
+            "policy",
+        ],
+        ascending=[True, True, False, False, True],
+        kind="stable",
+    ).reset_index(drop=True)
+    ranked.insert(0, "rank", np.arange(1, len(ranked) + 1, dtype=int))
+    return ranked.drop(columns=["_feasibility_group", "_violation_order"])
+
+
+def winner_summary(ranked: pd.DataFrame, mode: str) -> str:
+    """Describe the deterministic winner selected from a ranked result table."""
+
+    if ranked.empty:
+        return f"{mode.title()} has no policies to rank."
+    winner = ranked.iloc[0]
+    label = "Phase 2 contextual" if mode == "contextual" else "Phase 3 CMDP"
+    reward_per_cost = float(winner["reward_per_cost_mean"])
+    cumulative_reward = float(winner["cumulative_reward_mean"])
+    parity_gap = float(winner["demographic_parity_gap_mean"])
+    quota_deficit = float(winner["total_quota_deficit_mean"])
+    if bool(winner["fairness_feasible"]):
+        qualification = "It satisfies the configured parity and quota thresholds"
+    else:
+        qualification = (
+            "It is the best compromise; no fairness-feasible policy was found"
+        )
+    return (
+        f"{label} winner: {winner['policy']}. {qualification}, with mean "
+        f"reward-per-cost {reward_per_cost:.6f}, cumulative reward "
+        f"{cumulative_reward:.3f}, parity gap {parity_gap:.6f}, and total "
+        f"quota deficit {quota_deficit:.6f}."
+    )
+
+
+def _format_table_value(value: object) -> str:
+    if isinstance(value, (bool, np.bool_)):
+        return "yes" if bool(value) else "no"
+    if value is None or (not isinstance(value, str) and pd.isna(value)):
+        return "-"
+    if isinstance(value, (float, np.floating)):
+        return f"{float(value):.5f}"
+    return str(value)
+
+
+def _bordered_table(frame: pd.DataFrame) -> str:
+    headers = [str(column) for column in frame.columns]
+    values = [
+        [_format_table_value(value) for value in row]
+        for row in frame.itertuples(index=False, name=None)
+    ]
+    widths = [
+        max(len(headers[index]), *(len(row[index]) for row in values))
+        for index in range(len(headers))
+    ]
+    border = "+" + "+".join("-" * (width + 2) for width in widths) + "+"
+
+    def render(row: Sequence[str]) -> str:
+        return "| " + " | ".join(
+            value.ljust(width) for value, width in zip(row, widths)
+        ) + " |"
+
+    lines = [border, render(headers), border]
+    for row in values:
+        lines.extend((render(row), border))
+    return "\n".join(lines)
+
+
+def format_ranked_table(ranked: pd.DataFrame, mode: str) -> str:
+    """Build a compact dependency-free ASCII grid for terminal display."""
+
+    columns = {
+        "rank": "Rank",
+        "policy": "Policy",
+        "fairness_feasible": "Fair",
+        "cumulative_reward_mean": "Reward",
+        "reward_per_cost_mean": "Reward/Cost",
+        "repayment_rate_mean": "Repayment",
+        "demographic_parity_gap_mean": "Parity Gap",
+        "total_quota_deficit_mean": "Quota Deficit",
+    }
+    if mode == "contextual":
+        columns["budget_utilization_mean"] = "Budget Use"
+    if mode == "cmdp":
+        columns["capital_turnover_mean"] = "Turnover"
+        columns["capital_survival_ratio_mean"] = "Capital Survival"
+    available = {key: value for key, value in columns.items() if key in ranked}
+    return _bordered_table(ranked[list(available)].rename(columns=available))
+
+
+def _package_versions() -> dict[str, str]:
+    versions = {"python": platform.python_version()}
+    for package in ("numpy", "pandas", "matplotlib"):
+        try:
+            versions[package] = version(package)
+        except PackageNotFoundError:
+            versions[package] = "not installed"
+    return versions
+
+
+def _mean_std_column(ranked: pd.DataFrame, metric: str) -> pd.Series:
+    means = ranked[f"{metric}_mean"]
+    standard_deviations = ranked.get(
+        f"{metric}_std", pd.Series(0.0, index=ranked.index)
+    )
+    return pd.Series(
+        [
+            f"{float(mean):.6f} ± {float(std):.6f}"
+            for mean, std in zip(means, standard_deviations)
+        ],
+        index=ranked.index,
+    )
+
+
+def _html_ranked_table(ranked: pd.DataFrame, mode: str) -> str:
+    display = pd.DataFrame(
+        {
+            "Rank": ranked["rank"],
+            "Policy": ranked["policy"],
+            "Fairness feasible": ranked["fairness_feasible"].map(
+                {True: "Yes", False: "No"}
+            ),
+            "Reward (mean ± std)": _mean_std_column(
+                ranked, "cumulative_reward"
+            ),
+            "Reward/cost (mean ± std)": _mean_std_column(
+                ranked, "reward_per_cost"
+            ),
+            "Repayment (mean ± std)": _mean_std_column(
+                ranked, "repayment_rate"
+            ),
+            "Parity gap (mean ± std)": _mean_std_column(
+                ranked, "demographic_parity_gap"
+            ),
+            "Quota deficit (mean ± std)": _mean_std_column(
+                ranked, "total_quota_deficit"
+            ),
+        }
+    )
+    if mode == "contextual" and "budget_utilization_mean" in ranked:
+        display["Budget use (mean ± std)"] = _mean_std_column(
+            ranked, "budget_utilization"
+        )
+    if mode == "cmdp":
+        display["Capital turnover (mean ± std)"] = _mean_std_column(
+            ranked, "capital_turnover"
+        )
+        display["Capital survival (mean ± std)"] = _mean_std_column(
+            ranked, "capital_survival_ratio"
+        )
+    return display.to_html(index=False, border=0, classes="results", escape=True)
+
+
+REPORT_STYLE = """
+body { font-family: system-ui, sans-serif; margin: 2rem; color: #172033; }
+h1, h2 { color: #203864; }
+.winner { padding: 1rem; background: #eaf4e8; border-left: 5px solid #3d7d35; }
+.note { padding: .8rem; background: #f2f5f9; border-left: 5px solid #68778d; }
+table.results { border-collapse: collapse; width: 100%; font-size: .88rem; }
+table.results th, table.results td { border: 1px solid #6b7280; padding: .45rem; text-align: right; }
+table.results th:nth-child(2), table.results td:nth-child(2) { text-align: left; }
+table.results th { background: #203864; color: white; position: sticky; top: 0; }
+table.results tr:nth-child(even) { background: #f5f7fa; }
+pre { background: #f5f7fa; border: 1px solid #c9d0d9; padding: 1rem; overflow: auto; }
+a { color: #174ea6; }
+""".strip()
+
+
+def save_evaluation_report(
+    aggregate: pd.DataFrame,
+    output: Path,
+    mode: str,
+    parity_tolerance: float,
+    seeds: Sequence[int],
+    configuration: Mapping[str, object],
+    policy_parameters: Mapping[str, object],
+    quota_tolerance: float = 0.01,
+) -> pd.DataFrame:
+    """Rank results and persist reproducibility and human-readable reports."""
+
+    output.mkdir(parents=True, exist_ok=True)
+    ranked = rank_results(aggregate, parity_tolerance, quota_tolerance)
+    summary = winner_summary(ranked, mode)
+    ranked.to_csv(output / "ranked_results.csv", index=False)
+    (output / "winner_summary.txt").write_text(summary + "\n", encoding="utf-8")
+    manifest = {
+        "mode": mode,
+        "seeds": list(seeds),
+        "policies": ranked["policy"].tolist(),
+        "fairness_thresholds": {
+            "parity_tolerance": parity_tolerance,
+            "quota_tolerance": quota_tolerance,
+        },
+        "configuration": dict(configuration),
+        "policy_parameters": dict(policy_parameters),
+        "package_versions": _package_versions(),
+    }
+    (output / "run_manifest.json").write_text(
+        json.dumps(manifest, indent=2, sort_keys=True, default=str) + "\n",
+        encoding="utf-8",
+    )
+    title = "Phase 2 Contextual Bandits" if mode == "contextual" else "Phase 3 CMDP"
+    report = f"""<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{escape(title)} evaluation</title><style>{REPORT_STYLE}</style></head>
+<body><h1>{escape(title)} evaluation</h1>
+<p class="winner">{escape(summary)}</p>
+<p class="note">Policies are fairness-feasible when mean demographic parity gap is at most {parity_tolerance:.6f} and mean total quota deficit is at most {quota_tolerance:.6f}. Feasible policies rank by reward-per-cost, then cumulative reward. Infeasible policies rank by constraint violation before utility.</p>
+<h2>Ranked results</h2>{_html_ranked_table(ranked, mode)}
+<h2>Reproducibility manifest</h2><pre>{escape(json.dumps(manifest, indent=2, sort_keys=True, default=str))}</pre>
+</body></html>"""
+    (output / "report.html").write_text(report, encoding="utf-8")
+    return ranked
+
+
+def save_combined_report(
+    ranked_results: Mapping[str, pd.DataFrame],
+    output: Path,
+) -> Path:
+    """Save the all-mode summary without comparing incompatible phases."""
+
+    output.mkdir(parents=True, exist_ok=True)
+    sections: list[str] = []
+    for mode in ("contextual", "cmdp"):
+        ranked = ranked_results.get(mode)
+        if ranked is None or ranked.empty:
+            continue
+        label = "Phase 2 Contextual" if mode == "contextual" else "Phase 3 CMDP"
+        sections.append(
+            f"<h2>{escape(label)}</h2><p class=\"winner\">"
+            f"{escape(winner_summary(ranked, mode))}</p>"
+            f"<p><a href=\"{mode}/report.html\">Open the full {escape(label)} report</a></p>"
+        )
+    report = f"""<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Combined experiment summary</title><style>{REPORT_STYLE}</style></head>
+<body><h1>Combined experiment summary</h1>
+<p class="note">Phase 2 and Phase 3 have different budget and capital lifecycles, so each phase has its own winner and no cross-phase winner is declared.</p>
+{''.join(sections)}</body></html>"""
+    path = output / "report.html"
+    path.write_text(report, encoding="utf-8")
+    return path
