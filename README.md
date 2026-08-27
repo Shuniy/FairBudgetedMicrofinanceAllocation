@@ -1,14 +1,19 @@
-# Fair Budgeted Microfinance Bandits
+# Fair Budgeted Microfinance — Phases 1–3
 
-This project provides one implementation for two related experiments:
+This project provides one runner and shared domain layer for three experiments:
 
-- **arm mode** learns which borrower-group distribution to fund when loan costs
+- **Phase 1 / arm mode** learns which borrower-group distribution to fund when loan costs
   are sampled from configured means and standard deviations;
-- **contextual mode** generates a fresh pool of individual applications and
-  learns which affordable borrower to fund from observable application features.
+- **Phase 2 / contextual mode** generates a fresh pool of individual applications
+  and learns which affordable borrower to fund from observable application features;
+- **Phase 3 / CMDP mode** adds persistent portfolio state, delayed repayment,
+  capital-at-risk, principal recycling, and hard or Lagrangian fairness constraints.
 
-Both modes use the same budget lifecycle, feedback schema, fairness accounting,
-evaluation pipeline, metrics, result files, and fairness wrappers.
+All phases reuse the same borrower/application models, feature encoding, synthetic
+population, fairness accounting, core metrics, ridge learner, plotting, and result
+display. Phase 3 keeps its stateful environment and policy contract in dedicated
+files because recyclable capital and batch lending are different from the one-shot
+budget lifecycle used by Phases 1 and 2.
 
 ## Unified environment API
 
@@ -37,16 +42,23 @@ compatibility wrappers or aliases.
 python -m pip install -r requirements.txt
 ```
 
-## Run
+## Four runner options
 
 ```bash
-python main.py --mode arm
-python main.py --mode contextual
+python main.py --mode 1  # Phase 1: arm bandits
+python main.py --mode 2  # Phase 2: contextual bandits
+python main.py --mode 3  # Phase 3: contextual CMDP
+python main.py --mode 4  # all phases plus a combined metrics table
 ```
 
-Shared options are `--seeds`, `--rounds`, `--budget`, and `--output`.
-Contextual mode also accepts `--pool-size` and `--feedback-delay`. Arm mode can
-load distributions from `--arms-config path/to/arms.json`:
+The named forms `arm`, `contextual`, `cmdp`, and `all` are equivalent. Running
+`python main.py` without `--mode` opens the same four-option menu.
+
+Shared options are `--seeds`, `--rounds`, `--budget`, and `--output`. Contextual
+mode also accepts `--pool-size` and `--feedback-delay`. CMDP mode accepts
+`--pool-size`, `--batch-size`, `--repayment-delay`, `--recycle-fraction`,
+`--default-recovery`, `--liquidity-reserve`, and `--parity-tolerance`. Arm mode
+can load distributions from `--arms-config path/to/arms.json`:
 
 ```json
 {
@@ -66,12 +78,20 @@ load distributions from `--arms-config path/to/arms.json`:
 If no arm file is supplied, three built-in groups are used and every cost
 standard deviation is 10% of its mean.
 
-Results are printed and written to `outputs/arm/` or `outputs/contextual/`:
+Phase 1/2 results are printed and written to `outputs/arm/` or
+`outputs/contextual/`:
 
 - `episode_summaries.csv`
 - `trajectories.csv`
 - `aggregate_results.csv`
 - cumulative reward, repayment rate, parity gap, and quota satisfaction plots
+
+Phase 3 writes the same summary/trajectory/aggregate files under `outputs/cmdp/`,
+plus `funding_log.csv`, `maturity_log.csv`, and portfolio-state plots. All mode
+writes each phase beneath `outputs/all/` and adds
+`combined_aggregate_results.csv`. Rankings in that table are within each mode;
+raw reward and cost scales are not assumed to be directly comparable across
+different phase lifecycles.
 
 ## Fairness and prediction
 
@@ -87,3 +107,7 @@ benchmarks.
 ```bash
 python -m pytest -q
 ```
+
+The imported `phase3_fair_contextual_cmdp_project/` directory is retained as a
+reference snapshot. The merged parent implementation does not import from it.
+See `MERGE_PLAN.md` for the consolidation analysis and reusable component map.

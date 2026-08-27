@@ -8,7 +8,11 @@ import pytest
 from Data.arm_data import default_arm_configuration, load_arm_configuration
 from Environments.synthetic_environment_bandits import ArmBanditEnvironment
 from evaluate import compare_policies, save_results
-from main import build_arm_policy_factories
+from main import (
+    build_arm_policy_factories,
+    combine_aggregate_results,
+    parse_args,
+)
 from models.environment_config import EnvironmentConfig
 
 
@@ -67,3 +71,24 @@ def test_shared_runner_saves_mode_neutral_results(tmp_path) -> None:
     ):
         assert (tmp_path / filename).exists()
     assert isinstance(pd.read_csv(tmp_path / "trajectories.csv"), pd.DataFrame)
+
+
+def test_runner_accepts_four_numeric_and_named_modes() -> None:
+    assert parse_args(["--mode", "1"]).mode == "1"
+    assert parse_args(["--mode", "contextual"]).mode == "contextual"
+    assert parse_args(["--mode", "3"]).mode == "3"
+    assert parse_args(["--mode", "all"]).mode == "all"
+
+
+def test_combined_results_preserve_mode_and_rank() -> None:
+    columns = pd.MultiIndex.from_tuples(
+        [("cumulative_reward", "mean"), ("cumulative_reward", "std")]
+    )
+    arm = pd.DataFrame([[2.0, 0.0]], index=["arm_policy"], columns=columns)
+    cmdp = pd.DataFrame([[3.0, 0.0]], index=["cmdp_policy"], columns=columns)
+    arm.index.name = "policy"
+    cmdp.index.name = "policy"
+    combined = combine_aggregate_results({"arm": arm, "cmdp": cmdp})
+    assert set(combined["mode"]) == {"arm", "cmdp"}
+    assert set(combined["policy"]) == {"arm_policy", "cmdp_policy"}
+    assert (combined["rank_within_mode"] == 1.0).all()

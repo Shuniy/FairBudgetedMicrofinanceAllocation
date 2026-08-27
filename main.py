@@ -1,10 +1,20 @@
 from __future__ import annotations
 
 import argparse
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 
 from Algorithms.bandit import RandomPolicy
 from Algorithms.budgeted_ucb import BudgetedUCBPolicy
+from Algorithms.cmdp import (
+    ContextOnlyBudgetedLinUCBPolicy,
+    HardFairCMDPPolicy,
+    LagrangianFairCMDPPolicy,
+    OraclePortfolioPolicy,
+    PortfolioAwareLinUCBPolicy,
+    PortfolioAwareThompsonPolicy,
+    RandomCMDPPolicy,
+)
 from Algorithms.contextual import (
     ContextualEpsilonGreedyPolicy,
     ContextualThompsonSamplingPolicy,
@@ -27,8 +37,38 @@ from Algorithms.ucb import UCBPolicy
 from Data.arm_data import default_arm_configuration, load_arm_configuration
 from Data.feature_encoder import BorrowerFeatureEncoder
 from Environments.base_environment import BanditEnvironment
-from evaluate import compare_policies, display_results, save_results
-from models.environment_config import ContextualEnvironmentConfig, EnvironmentConfig
+from evaluate import (
+    compare_cmdp_policies,
+    compare_policies,
+    display_results,
+    save_cmdp_results,
+    save_results,
+)
+from models.environment_config import (
+    CMDPEnvironmentConfig,
+    ContextualEnvironmentConfig,
+    EnvironmentConfig,
+)
+from models.fairness_config import LagrangianConfig
+
+
+MODE_ALIASES = {
+    "1": "arm",
+    "2": "contextual",
+    "3": "cmdp",
+    "4": "all",
+    "arm": "arm",
+    "contextual": "contextual",
+    "cmdp": "cmdp",
+    "all": "all",
+}
+
+DEFAULT_TARGET_SHARES = {
+    "disabled": 0.04,
+    "reserved": 0.08,
+    "minority": 0.12,
+    "women": 0.25,
+}
 
 
 def build_arm_policy_factories(target_shares: dict[str, float]):
@@ -130,36 +170,147 @@ def build_contextual_policy_factories(target_shares: dict[str, float]):
     }
 
 
-def parse_args() -> argparse.Namespace:
+def build_cmdp_policy_factories(
+    target_shares: Mapping[str, float],
+    parity_tolerance: float,
+):
+    """Build Phase 3 policies while reusing the parent contextual ridge model."""
+
+    lagrangian_config = LagrangianConfig(
+        target_shares=target_shares,
+        parity_tolerance=parity_tolerance,
+        quota_tolerance=0.01,
+        dual_learning_rate=0.20,
+        initial_lambda_quota=0.20,
+        initial_lambda_parity=0.20,
+        max_lambda=8.0,
+        warmup_rounds=5,
+    )
+    return {
+        "random_cmdp": lambda dimensions, seed: RandomCMDPPolicy(
+            dimensions, seed=seed
+        ),
+        "context_only_budgeted_linucb": (
+            lambda dimensions, seed: ContextOnlyBudgetedLinUCBPolicy(
+                dimensions, alpha=0.70, seed=seed
+            )
+        ),
+        "portfolio_linucb": lambda dimensions, seed: PortfolioAwareLinUCBPolicy(
+            dimensions,
+            alpha=0.70,
+            base_shadow_price=0.22,
+            seed=seed,
+        ),
+        "portfolio_thompson": (
+            lambda dimensions, seed: PortfolioAwareThompsonPolicy(
+                dimensions,
+                posterior_scale=0.30,
+                base_shadow_price=0.22,
+                seed=seed,
+            )
+        ),
+        "cmdp_fair_hard": lambda dimensions, seed: HardFairCMDPPolicy(
+            base_policy=PortfolioAwareLinUCBPolicy(
+                dimensions,
+                alpha=0.70,
+                base_shadow_price=0.22,
+                seed=seed,
+            ),
+            target_shares=target_shares,
+            parity_tolerance=parity_tolerance,
+            seed=seed,
+        ),
+        "cmdp_fair_lagrangian": (
+            lambda dimensions, seed: LagrangianFairCMDPPolicy(
+                base_policy=PortfolioAwareLinUCBPolicy(
+                    dimensions,
+                    alpha=0.70,
+                    base_shadow_price=0.22,
+                    seed=seed,
+                ),
+                config=lagrangian_config,
+                seed=seed,
+            )
+        ),
+        "oracle_portfolio": lambda dimensions, seed: OraclePortfolioPolicy(
+            dimensions,
+            state_aware=True,
+            seed=seed,
+        ),
+    }
+
+
+def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     """Parse command-line arguments for running experiments."""
     parser = argparse.ArgumentParser(
-        description="Run fair budgeted arm or contextual bandit experiments"
+        description=(
+            "Run Phase 1 arm bandits, Phase 2 contextual bandits, "
+            "Phase 3 CMDP, or all phases"
+        )
     )
-    parser.add_argument("--mode", choices=("arm", "contextual"), required=True)
+    parser.add_argument(
+        "--mode",
+        choices=tuple(MODE_ALIASES),
+        help="1/arm, 2/contextual, 3/cmdp, or 4/all; omit for an interactive menu",
+    )
     parser.add_argument("--seeds", type=int, default=10)
     parser.add_argument("--rounds", type=int, default=150)
-    parser.add_argument("--budget", type=float)
+    parser.add_argument(
+        "--budget",
+        type=float,
+        help="one-shot budget in Phases 1/2; initial capital stock in Phase 3",
+    )
     parser.add_argument("--output", type=Path)
     parser.add_argument("--arms-config", type=Path)
     parser.add_argument("--pool-size", type=int, default=20)
     parser.add_argument("--feedback-delay", type=int, default=0)
-    args = parser.parse_args()
+    parser.add_argument("--batch-size", type=int, default=3)
+    parser.add_argument(
+        "--repayment-delay",
+        "--delay",
+        dest="repayment_delay",
+        type=int,
+        default=8,
+    )
+    parser.add_argument("--recycle-fraction", type=float, default=1.0)
+    parser.add_argument("--default-recovery", type=float, default=0.0)
+    parser.add_argument("--liquidity-reserve", type=float, default=0.0)
+    parser.add_argument("--parity-tolerance", type=float, default=0.05)
+    args = parser.parse_args(argv)
     if args.seeds <= 0:
         parser.error("--seeds must be positive")
     if args.rounds <= 0:
         parser.error("--rounds must be positive")
     if args.budget is not None and args.budget <= 0:
         parser.error("--budget must be positive")
-    if args.mode == "arm" and args.feedback_delay != 0:
+    normalized_mode = MODE_ALIASES.get(args.mode) if args.mode else None
+    if normalized_mode in {"arm", "cmdp"} and args.feedback_delay != 0:
         parser.error("--feedback-delay is only valid for contextual mode")
-    if args.mode == "contextual" and args.arms_config is not None:
+    if normalized_mode in {"contextual", "cmdp"} and args.arms_config is not None:
         parser.error("--arms-config is only valid for arm mode")
-    if args.mode == "contextual" and args.pool_size <= 0:
+    if args.pool_size <= 0:
         parser.error("--pool-size must be positive")
+    if args.feedback_delay < 0:
+        parser.error("--feedback-delay cannot be negative")
+    if args.batch_size <= 0:
+        parser.error("--batch-size must be positive")
+    if args.repayment_delay < 1:
+        parser.error("--repayment-delay must be at least one")
+    if not 0.0 <= args.recycle_fraction <= 1.0:
+        parser.error("--recycle-fraction must be in [0, 1]")
+    if not 0.0 <= args.default_recovery <= 1.0:
+        parser.error("--default-recovery must be in [0, 1]")
+    if args.liquidity_reserve < 0:
+        parser.error("--liquidity-reserve cannot be negative")
+    if not 0.0 <= args.parity_tolerance <= 1.0:
+        parser.error("--parity-tolerance must be in [0, 1]")
     return args
 
 
-def run_arm(args: argparse.Namespace) -> None:
+def run_arm(
+    args: argparse.Namespace,
+    output: Path | None = None,
+):
     """Run an arm bandit experiment with the specified arguments."""
     try:
         arms, targets = (
@@ -187,16 +338,20 @@ def run_arm(args: argparse.Namespace) -> None:
         targets,
         list(range(args.seeds)),
     )
-    output = args.output or Path("outputs") / "arm"
-    aggregate = save_results(summaries, trajectories, output, "arm")
-    display_results(aggregate, output, "arm")
+    destination = output or args.output or Path("outputs") / "arm"
+    aggregate = save_results(summaries, trajectories, destination, "arm")
+    display_results(aggregate, destination, "arm")
+    return aggregate
 
 
-def run_contextual(args: argparse.Namespace) -> None:
+def run_contextual(
+    args: argparse.Namespace,
+    output: Path | None = None,
+):
     """Run a contextual bandit experiment with the specified arguments."""
     budget = args.budget if args.budget is not None else 600_000.0
     encoder = BorrowerFeatureEncoder(include_protected_attributes=False)
-    targets = {"disabled": 0.04, "reserved": 0.08, "minority": 0.12, "women": 0.25}
+    targets = DEFAULT_TARGET_SHARES
 
     def environment_factory(seed: int) -> BanditEnvironment:
         return BanditEnvironment.for_contextual(
@@ -217,17 +372,144 @@ def run_contextual(args: argparse.Namespace) -> None:
         targets,
         list(range(args.seeds)),
     )
-    output = args.output or Path("outputs") / "contextual"
-    aggregate = save_results(summaries, trajectories, output, "contextual")
-    display_results(aggregate, output, "contextual")
+    destination = output or args.output or Path("outputs") / "contextual"
+    aggregate = save_results(
+        summaries,
+        trajectories,
+        destination,
+        "contextual",
+    )
+    display_results(aggregate, destination, "contextual")
+    return aggregate
+
+
+def run_cmdp(
+    args: argparse.Namespace,
+    output: Path | None = None,
+):
+    """Run Phase 3 with delayed feedback and recyclable capital."""
+
+    capital = args.budget if args.budget is not None else 600_000.0
+    encoder = BorrowerFeatureEncoder(include_protected_attributes=False)
+    config = CMDPEnvironmentConfig(
+        initial_capital=capital,
+        max_rounds=args.rounds,
+        pool_size=args.pool_size,
+        max_loans_per_round=args.batch_size,
+        repayment_delay_rounds=args.repayment_delay,
+        recycle_fraction=args.recycle_fraction,
+        default_recovery_fraction=args.default_recovery,
+        minimum_liquidity_reserve=args.liquidity_reserve,
+    )
+    summaries, trajectories, funding_log, maturity_log = compare_cmdp_policies(
+        env_config=config,
+        policy_factories=build_cmdp_policy_factories(
+            DEFAULT_TARGET_SHARES,
+            args.parity_tolerance,
+        ),
+        target_shares=DEFAULT_TARGET_SHARES,
+        parity_tolerance=args.parity_tolerance,
+        seeds=list(range(args.seeds)),
+        encoder=encoder,
+    )
+    destination = output or args.output or Path("outputs") / "cmdp"
+    aggregate = save_cmdp_results(
+        summaries,
+        trajectories,
+        funding_log,
+        maturity_log,
+        destination,
+    )
+    display_results(aggregate, destination, "cmdp")
+    return aggregate
+
+
+def combine_aggregate_results(
+    results: Mapping[str, "pd.DataFrame"],
+):
+    """Flatten each phase's aggregate metrics into one comparable report."""
+
+    import pandas as pd
+
+    frames: list[pd.DataFrame] = []
+    for mode, aggregate in results.items():
+        flattened = aggregate.copy()
+        flattened.columns = [
+            "_".join(str(part) for part in column if part)
+            for column in flattened.columns
+        ]
+        flattened = flattened.reset_index()
+        flattened.insert(0, "mode", mode)
+        frames.append(flattened)
+    combined = pd.concat(frames, ignore_index=True, sort=False)
+    if "cumulative_reward_mean" in combined:
+        combined["rank_within_mode"] = combined.groupby("mode")[
+            "cumulative_reward_mean"
+        ].rank(method="min", ascending=False)
+    return combined
+
+
+def run_all(args: argparse.Namespace):
+    """Run Phases 1, 2, and 3 and write a combined performance table."""
+
+    output = args.output or Path("outputs") / "all"
+    results = {
+        "arm": run_arm(args, output / "arm"),
+        "contextual": run_contextual(args, output / "contextual"),
+        "cmdp": run_cmdp(args, output / "cmdp"),
+    }
+    combined = combine_aggregate_results(results)
+    output.mkdir(parents=True, exist_ok=True)
+    combined.to_csv(output / "combined_aggregate_results.csv", index=False)
+    print("\nAll phases combined metrics:\n")
+    display_columns = [
+        column
+        for column in (
+            "mode",
+            "policy",
+            "rank_within_mode",
+            "cumulative_reward_mean",
+            "repayment_rate_mean",
+            "reward_per_cost_mean",
+            "budget_utilization_mean",
+            "capital_turnover_mean",
+            "capital_survival_ratio_mean",
+            "demographic_parity_gap_mean",
+            "quota_satisfaction_rate_mean",
+        )
+        if column in combined
+    ]
+    print(combined[display_columns].round(5).to_string(index=False))
+    print(f"\nSaved combined results to: {output.resolve()}")
+    return combined
+
+
+def prompt_for_mode() -> str:
+    print("\nChoose an experiment:")
+    print("  1. Arm bandits on simulated mean/std borrower groups")
+    print("  2. Contextual bandits on simulated borrower applications")
+    print("  3. Stateful contextual CMDP")
+    print("  4. Run all phases and compare metrics")
+    try:
+        choice = input("Selection [1-4]: ").strip().lower()
+    except EOFError as exc:
+        raise SystemExit("No mode selected; pass --mode 1, 2, 3, or 4") from exc
+    if choice not in MODE_ALIASES:
+        raise SystemExit("Invalid selection; choose 1, 2, 3, or 4")
+    return MODE_ALIASES[choice]
 
 
 def main() -> None:
     args = parse_args()
-    if args.mode == "arm":
+    mode = MODE_ALIASES[args.mode] if args.mode else prompt_for_mode()
+    if mode == "arm":
         run_arm(args)
-    else:
+    elif mode == "contextual":
         run_contextual(args)
+    elif mode == "cmdp":
+        run_cmdp(args)
+    else:
+        run_all(args)
 
 
 if __name__ == "__main__":

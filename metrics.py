@@ -89,3 +89,58 @@ def repayment_rate(rewards: Sequence[float]) -> float:
     Computes the repayment rate as the mean of the rewards.
     If there are no rewards, returns 0.0."""
     return float(np.mean(rewards)) if len(rewards) else 0.0
+
+
+def total_quota_deficit(
+    funded: Mapping[str, int],
+    target_shares: Mapping[str, float],
+) -> float:
+    """Return the total shortfall across all configured allocation quotas."""
+
+    return float(sum(quota_deficits(funded, target_shares).values()))
+
+
+def parity_violation(
+    funded: Mapping[str, int],
+    opportunities: Mapping[str, int],
+    tolerance: float,
+) -> float:
+    """Return the amount by which the opportunity-based parity gap exceeds a limit."""
+
+    return max(0.0, demographic_parity_gap(funded, opportunities) - tolerance)
+
+
+def reward_per_disbursed_capital(
+    rewards: Sequence[float],
+    principals: Sequence[float],
+) -> float:
+    """Phase 3 name for the shared reward-per-cost calculation."""
+
+    return reward_per_unit_cost(rewards, principals)
+
+
+def capital_turnover(cumulative_disbursed: float, initial_capital: float) -> float:
+    """Measure how many times the initial capital stock has been lent."""
+
+    return cumulative_disbursed / initial_capital if initial_capital > 0 else 0.0
+
+
+def liquidity_utilization(available_capital: float, capital_at_risk: float) -> float:
+    """Return the share of surviving capital currently committed to loans."""
+
+    surviving = available_capital + capital_at_risk
+    return capital_at_risk / surviving if surviving > 0 else 0.0
+
+
+def capital_survival_ratio(
+    available_capital: float,
+    capital_at_risk: float,
+    initial_capital: float,
+) -> float:
+    """Return current liquid plus at-risk capital relative to initial capital."""
+
+    return (
+        (available_capital + capital_at_risk) / initial_capital
+        if initial_capital > 0
+        else 0.0
+    )
