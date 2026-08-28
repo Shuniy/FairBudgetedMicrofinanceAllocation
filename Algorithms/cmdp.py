@@ -453,7 +453,7 @@ class LagrangianFairCMDPPolicy(CMDPPolicy):
                 self.config.target_shares,
                 self.config.parity_tolerance,
             )
-            scores[action] -= (
+            scores[action] -= self.config.strength_scale * (
                 self.lambda_quota * projected["quota_violation"]
                 + self.lambda_parity * projected["parity_violation"]
             )

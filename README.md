@@ -42,17 +42,18 @@ compatibility wrappers or aliases.
 python -m pip install -r requirements.txt
 ```
 
-## Four runner options
+## Five runner options
 
 ```bash
 python main.py --mode 1  # Phase 1: arm bandits
 python main.py --mode 2  # Phase 2: contextual bandits
 python main.py --mode 3  # Phase 3: contextual CMDP
 python main.py --mode 4  # all phases plus a combined metrics table
+python main.py --mode 5  # Phase 3 CMDP robustness/sensitivity sweeps
 ```
 
-The named forms `arm`, `contextual`, `cmdp`, and `all` are equivalent. Running
-`python main.py` without `--mode` opens the same four-option menu.
+The named forms `arm`, `contextual`, `cmdp`, `all`, and `sweeps` are equivalent.
+Running `python main.py` without `--mode` opens the same five-option menu.
 
 Shared options are `--seeds`, `--rounds`, `--budget`, and `--output`. Contextual
 mode also accepts `--pool-size` and `--feedback-delay`. CMDP mode accepts
@@ -96,6 +97,28 @@ writes each phase beneath `outputs/all/` and adds
 `combined_aggregate_results.csv`. Rankings in that table are within each mode;
 raw reward and cost scales are not assumed to be directly comparable across
 different phase lifecycles.
+
+Mode 5 evaluates only the same 12 Phase 3 policies used by CMDP mode. Its full
+defaults use 10 common seeds and the following settings:
+
+- initial-capital multipliers: `0.50, 0.75, 1.00, 1.25, 1.50`;
+- marginalized-community probabilities: `0.10, 0.20, 0.30, 0.40, 0.50`;
+- policy-specific fairness strengths: `0.00, 0.25, 0.50, 0.75, 1.00, 1.25`.
+
+The group-imbalance value controls `P(marginalized_community=True)`. Because the
+audited primary fairness group gives disability and reserved status precedence,
+the observed primary `minority` share can be lower. Hard-policy fairness strength
+scales quota targets while holding parity tolerance fixed. Lagrangian strength
+scales the penalty applied to adaptive dual variables while leaving targets and
+dual updates fixed; these mechanisms are reported separately.
+
+Full results are written below `outputs/cmdp_robustness/sweeps/`, with per-seed
+and aggregate CSVs, configuration and summary JSON files, audit logs, plots, and
+`outputs/cmdp_robustness/report.html`. Run a small smoke matrix with:
+
+```bash
+python main.py --mode 5 --quick-test --rounds 3
+```
 
 Contextual and CMDP runs also write `ranked_results.csv`, `winner_summary.txt`,
 `run_manifest.json`, and a bordered `report.html`. A policy qualifies as

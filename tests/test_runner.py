@@ -73,11 +73,13 @@ def test_shared_runner_saves_mode_neutral_results(tmp_path) -> None:
     assert isinstance(pd.read_csv(tmp_path / "trajectories.csv"), pd.DataFrame)
 
 
-def test_runner_accepts_four_numeric_and_named_modes() -> None:
+def test_runner_accepts_five_numeric_and_named_modes() -> None:
     assert parse_args(["--mode", "1"]).mode == "1"
     assert parse_args(["--mode", "contextual"]).mode == "contextual"
     assert parse_args(["--mode", "3"]).mode == "3"
     assert parse_args(["--mode", "all"]).mode == "all"
+    assert parse_args(["--mode", "5"]).mode == "5"
+    assert parse_args(["--mode", "sweeps", "--quick-test"]).mode == "sweeps"
 
 
 def test_combined_results_preserve_mode_and_rank() -> None:

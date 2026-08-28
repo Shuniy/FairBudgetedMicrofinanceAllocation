@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import argparse
 from collections.abc import Mapping, Sequence
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from pathlib import Path
 
 from Algorithms.bandit import RandomPolicy
@@ -56,6 +56,18 @@ from models.environment_config import (
     EnvironmentConfig,
 )
 from models.fairness_config import LagrangianConfig
+from robustness import (
+    BUDGET_SWEEP_VALUES,
+    FAIRNESS_SWEEP_VALUES,
+    IMBALANCE_SWEEP_VALUES,
+    QUICK_BUDGET_SWEEP_VALUES,
+    QUICK_FAIRNESS_SWEEP_VALUES,
+    QUICK_IMBALANCE_SWEEP_VALUES,
+    CMDPSweepCase,
+    run_cmdp_sweep,
+    save_mode5_report,
+    validate_mode5_baselines,
+)
 
 
 MODE_ALIASES = {
@@ -63,10 +75,13 @@ MODE_ALIASES = {
     "2": "contextual",
     "3": "cmdp",
     "4": "all",
+    "5": "sweeps",
     "arm": "arm",
     "contextual": "contextual",
     "cmdp": "cmdp",
     "all": "all",
+    "sweeps": "sweeps",
+    "robustness": "sweeps",
 }
 
 DEFAULT_TARGET_SHARES = {
@@ -214,6 +229,8 @@ def build_contextual_policy_factories(target_shares: dict[str, float]):
 def build_cmdp_policy_factories(
     target_shares: Mapping[str, float],
     parity_tolerance: float,
+    *,
+    lagrangian_strength_scale: float = 1.0,
 ):
     """Build Phase 3 policies while reusing the parent contextual ridge model."""
 
@@ -226,6 +243,7 @@ def build_cmdp_policy_factories(
         initial_lambda_parity=0.20,
         max_lambda=8.0,
         warmup_rounds=5,
+        strength_scale=lagrangian_strength_scale,
     )
     return {
         "random_cmdp": lambda dimensions, seed: RandomCMDPPolicy(
@@ -340,13 +358,16 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
             "Run Phase 1 arm bandits, Phase 2 contextual bandits, "
-            "Phase 3 CMDP, or all phases"
+            "Phase 3 CMDP, all phases, or Phase 3 robustness sweeps"
         )
     )
     parser.add_argument(
         "--mode",
         choices=tuple(MODE_ALIASES),
-        help="1/arm, 2/contextual, 3/cmdp, or 4/all; omit for an interactive menu",
+        help=(
+            "1/arm, 2/contextual, 3/cmdp, 4/all, or 5/sweeps; "
+            "omit for an interactive menu"
+        ),
     )
     parser.add_argument("--seeds", type=int, default=10)
     parser.add_argument("--rounds", type=int, default=150)
@@ -371,6 +392,11 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--default-recovery", type=float, default=0.0)
     parser.add_argument("--liquidity-reserve", type=float, default=0.0)
     parser.add_argument("--parity-tolerance", type=float, default=0.05)
+    parser.add_argument(
+        "--quick-test",
+        action="store_true",
+        help="Mode 5 only: use two seeds and two values per sweep",
+    )
     args = parser.parse_args(argv)
     if args.seeds <= 0:
         parser.error("--seeds must be positive")
@@ -379,9 +405,9 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     if args.budget is not None and args.budget <= 0:
         parser.error("--budget must be positive")
     normalized_mode = MODE_ALIASES.get(args.mode) if args.mode else None
-    if normalized_mode in {"arm", "cmdp"} and args.feedback_delay != 0:
+    if normalized_mode in {"arm", "cmdp", "sweeps"} and args.feedback_delay != 0:
         parser.error("--feedback-delay is only valid for contextual mode")
-    if normalized_mode in {"contextual", "cmdp"} and args.arms_config is not None:
+    if normalized_mode in {"contextual", "cmdp", "sweeps"} and args.arms_config is not None:
         parser.error("--arms-config is only valid for arm mode")
     if args.pool_size <= 0:
         parser.error("--pool-size must be positive")
@@ -399,6 +425,8 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         parser.error("--liquidity-reserve cannot be negative")
     if not 0.0 <= args.parity_tolerance <= 1.0:
         parser.error("--parity-tolerance must be in [0, 1]")
+    if args.quick_test and normalized_mode not in {None, "sweeps"}:
+        parser.error("--quick-test is only valid for Mode 5")
     return args
 
 
@@ -648,18 +676,222 @@ def run_all(args: argparse.Namespace):
     return combined
 
 
+def _only_cmdp_fairness_family(
+    factories: Mapping[str, object],
+    family: str,
+):
+    marker = f"cmdp_fair_{family}_"
+    return {
+        name: factory
+        for name, factory in factories.items()
+        if name.startswith(marker)
+    }
+
+
+def run_cmdp_sweeps(args: argparse.Namespace):
+    """Run Mode 5 robustness experiments using only Phase 3 CMDP policies."""
+
+    capital = args.budget if args.budget is not None else 600_000.0
+    base_config = CMDPEnvironmentConfig(
+        initial_capital=capital,
+        max_rounds=args.rounds,
+        pool_size=args.pool_size,
+        max_loans_per_round=args.batch_size,
+        repayment_delay_rounds=args.repayment_delay,
+        recycle_fraction=args.recycle_fraction,
+        default_recovery_fraction=args.default_recovery,
+        minimum_liquidity_reserve=args.liquidity_reserve,
+    )
+    seeds = list(range(min(args.seeds, 2) if args.quick_test else args.seeds))
+    budget_values = (
+        QUICK_BUDGET_SWEEP_VALUES
+        if args.quick_test
+        else BUDGET_SWEEP_VALUES
+    )
+    imbalance_values = (
+        QUICK_IMBALANCE_SWEEP_VALUES
+        if args.quick_test
+        else IMBALANCE_SWEEP_VALUES
+    )
+    fairness_values = (
+        QUICK_FAIRNESS_SWEEP_VALUES
+        if args.quick_test
+        else FAIRNESS_SWEEP_VALUES
+    )
+    destination = args.output or Path("outputs") / "cmdp_robustness"
+    sweeps_output = destination / "sweeps"
+    encoder = BorrowerFeatureEncoder(include_protected_attributes=False)
+
+    normal_factories = build_cmdp_policy_factories(
+        DEFAULT_TARGET_SHARES,
+        args.parity_tolerance,
+    )
+    budget_cases = [
+        CMDPSweepCase(
+            value=multiplier,
+            env_config=replace(
+                base_config,
+                initial_capital=capital * multiplier,
+            ),
+            policy_factories=normal_factories,
+            target_shares=DEFAULT_TARGET_SHARES,
+            parity_tolerance=args.parity_tolerance,
+            parameter_kind="initial_capital_multiplier",
+            parameter_details={
+                "budget_multiplier": multiplier,
+                "configured_initial_capital": capital * multiplier,
+            },
+            is_baseline=bool(multiplier == 1.0),
+        )
+        for multiplier in budget_values
+    ]
+    print("\nMode 5A: running Phase 3 budget sensitivity sweep...")
+    budget_artifact = run_cmdp_sweep(
+        "budget",
+        budget_cases,
+        seeds,
+        sweeps_output / "budget",
+        base_config,
+        QUOTA_TOLERANCE,
+        baseline_value=1.0,
+        encoder=encoder,
+    )
+
+    imbalance_cases = [
+        CMDPSweepCase(
+            value=minority_share,
+            env_config=replace(
+                base_config,
+                marginalized_probability=minority_share,
+            ),
+            policy_factories=normal_factories,
+            target_shares=DEFAULT_TARGET_SHARES,
+            parity_tolerance=args.parity_tolerance,
+            parameter_kind="marginalized_community_probability",
+            parameter_details={
+                "minority_share": minority_share,
+                "minority_share_definition": (
+                    "P(marginalized_community=True); the audited primary "
+                    "minority label excludes overlapping disability/reserved "
+                    "applicants because those labels have higher precedence"
+                ),
+            },
+            is_baseline=bool(minority_share == base_config.marginalized_probability),
+        )
+        for minority_share in imbalance_values
+    ]
+    print("Mode 5B: running Phase 3 group-imbalance sweep...")
+    imbalance_artifact = run_cmdp_sweep(
+        "group_imbalance",
+        imbalance_cases,
+        seeds,
+        sweeps_output / "group_imbalance",
+        base_config,
+        QUOTA_TOLERANCE,
+        baseline_value=base_config.marginalized_probability,
+        encoder=encoder,
+    )
+
+    fairness_cases: list[CMDPSweepCase] = []
+    for strength in fairness_values:
+        scaled_targets = {
+            group: share * strength
+            for group, share in DEFAULT_TARGET_SHARES.items()
+        }
+        hard_factories = _only_cmdp_fairness_family(
+            build_cmdp_policy_factories(
+                scaled_targets,
+                args.parity_tolerance,
+            ),
+            "hard",
+        )
+        fairness_cases.append(
+            CMDPSweepCase(
+                value=strength,
+                env_config=base_config,
+                policy_factories=hard_factories,
+                target_shares=scaled_targets,
+                parity_tolerance=args.parity_tolerance,
+                parameter_kind="hard_quota_target_scale",
+                parameter_details={
+                    "fairness_strength": strength,
+                    "quota_scale": strength,
+                    "parity_tolerance_held_fixed": args.parity_tolerance,
+                },
+                is_baseline=bool(strength == 1.0),
+            )
+        )
+        lagrangian_factories = _only_cmdp_fairness_family(
+            build_cmdp_policy_factories(
+                DEFAULT_TARGET_SHARES,
+                args.parity_tolerance,
+                lagrangian_strength_scale=strength,
+            ),
+            "lagrangian",
+        )
+        fairness_cases.append(
+            CMDPSweepCase(
+                value=strength,
+                env_config=base_config,
+                policy_factories=lagrangian_factories,
+                target_shares=DEFAULT_TARGET_SHARES,
+                parity_tolerance=args.parity_tolerance,
+                parameter_kind="lagrangian_penalty_scale",
+                parameter_details={
+                    "fairness_strength": strength,
+                    "lagrangian_strength_scale": strength,
+                    "base_initial_lambda_quota": 0.20,
+                    "base_initial_lambda_parity": 0.20,
+                    "dual_learning_rate_held_fixed": 0.20,
+                },
+                is_baseline=bool(strength == 1.0),
+            )
+        )
+    print("Mode 5C: running Phase 3 fairness-strength sweep...")
+    fairness_artifact = run_cmdp_sweep(
+        "fairness_strength",
+        fairness_cases,
+        seeds,
+        sweeps_output / "fairness_strength",
+        base_config,
+        QUOTA_TOLERANCE,
+        baseline_value=1.0,
+        encoder=encoder,
+    )
+
+    artifacts = {
+        "budget": budget_artifact,
+        "group_imbalance": imbalance_artifact,
+        "fairness_strength": fairness_artifact,
+    }
+    baseline_consistency = validate_mode5_baselines(artifacts, destination)
+    report = save_mode5_report(
+        artifacts,
+        destination,
+        seeds,
+        args.quick_test,
+        baseline_consistency,
+    )
+    episodes = sum(len(artifact.raw_results) for artifact in artifacts.values())
+    print(f"\nMode 5 completed {episodes} Phase 3 CMDP episodes.")
+    print(f"Saved robustness outputs to: {destination.resolve()}")
+    print(f"HTML report: {report.resolve()}")
+    return artifacts
+
+
 def prompt_for_mode() -> str:
     print("\nChoose an experiment:")
     print("  1. Arm bandits on simulated mean/std borrower groups")
     print("  2. Contextual bandits on simulated borrower applications")
     print("  3. Stateful contextual CMDP")
     print("  4. Run all phases and compare metrics")
+    print("  5. Phase 3 CMDP robustness sweeps")
     try:
-        choice = input("Selection [1-4]: ").strip().lower()
+        choice = input("Selection [1-5]: ").strip().lower()
     except EOFError as exc:
-        raise SystemExit("No mode selected; pass --mode 1, 2, 3, or 4") from exc
+        raise SystemExit("No mode selected; pass --mode 1, 2, 3, 4, or 5") from exc
     if choice not in MODE_ALIASES:
-        raise SystemExit("Invalid selection; choose 1, 2, 3, or 4")
+        raise SystemExit("Invalid selection; choose 1, 2, 3, 4, or 5")
     return MODE_ALIASES[choice]
 
 
@@ -672,8 +904,10 @@ def main() -> None:
         run_contextual(args)
     elif mode == "cmdp":
         run_cmdp(args)
-    else:
+    elif mode == "all":
         run_all(args)
+    else:
+        run_cmdp_sweeps(args)
 
 
 if __name__ == "__main__":

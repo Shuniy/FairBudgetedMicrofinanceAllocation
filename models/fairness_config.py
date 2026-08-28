@@ -38,6 +38,7 @@ class LagrangianConfig:
     initial_lambda_parity: float = 0.20
     max_lambda: float = 8.0
     warmup_rounds: int = 5
+    strength_scale: float = 1.0
 
     def __post_init__(self) -> None:
         _validate_target_shares(self.target_shares)
@@ -55,3 +56,5 @@ class LagrangianConfig:
             raise ValueError("initial Lagrange multipliers cannot exceed max_lambda")
         if self.warmup_rounds < 0:
             raise ValueError("warmup_rounds cannot be negative")
+        if self.strength_scale < 0:
+            raise ValueError("strength_scale cannot be negative")
