@@ -9,6 +9,7 @@ from Data.arm_data import default_arm_configuration, load_arm_configuration
 from Environments.synthetic_environment_bandits import ArmBanditEnvironment
 from evaluate import compare_policies, save_results
 from main import (
+    MODE_ALIASES,
     build_arm_policy_factories,
     combine_aggregate_results,
     parse_args,
@@ -80,6 +81,9 @@ def test_runner_accepts_five_numeric_and_named_modes() -> None:
     assert parse_args(["--mode", "all"]).mode == "all"
     assert parse_args(["--mode", "5"]).mode == "5"
     assert parse_args(["--mode", "sweeps", "--quick-test"]).mode == "sweeps"
+    assert parse_args(["--mode", "all", "--quick-test"]).mode == "all"
+    assert MODE_ALIASES["4"] == "sweeps"
+    assert MODE_ALIASES["5"] == "all"
 
 
 def test_combined_results_preserve_mode_and_rank() -> None:

@@ -859,26 +859,78 @@ def save_evaluation_report(
 def save_combined_report(
     ranked_results: Mapping[str, pd.DataFrame],
     output: Path,
+    arm_aggregate: pd.DataFrame | None = None,
+    sweep_report: Path | None = None,
 ) -> Path:
-    """Save the all-mode summary without comparing incompatible phases."""
+    """Save the Mode 5 suite summary without comparing incompatible modes."""
 
     output.mkdir(parents=True, exist_ok=True)
     sections: list[str] = []
+    if arm_aggregate is not None and not arm_aggregate.empty:
+        arm = _flatten_aggregate(arm_aggregate)
+        arm = arm.sort_values("cumulative_reward_mean", ascending=False)
+        columns = [
+            column
+            for column in (
+                "policy",
+                "cumulative_reward_mean",
+                "reward_per_cost_mean",
+                "repayment_rate_mean",
+                "demographic_parity_gap_mean",
+                "quota_satisfaction_rate_mean",
+            )
+            if column in arm
+        ]
+        arm_table = arm[columns].rename(
+            columns={
+                "policy": "Policy",
+                "cumulative_reward_mean": "Mean reward",
+                "reward_per_cost_mean": "Mean reward/cost",
+                "repayment_rate_mean": "Mean repayment",
+                "demographic_parity_gap_mean": "Mean parity gap",
+                "quota_satisfaction_rate_mean": "Mean quota satisfaction",
+            }
+        )
+        sections.append(
+            "<h2>Mode 1 — Arm Bandits</h2>"
+            '<p class="note">Policies are ordered by mean cumulative reward; '
+            "this is a within-mode description, not a cross-mode ranking.</p>"
+            f"{arm_table.to_html(index=False, border=0, classes='results arm-results', escape=True)}"
+            '<p><a href="arm/aggregate_results.csv">Open Mode 1 aggregate results</a></p>'
+        )
     for mode in ("contextual", "cmdp"):
         ranked = ranked_results.get(mode)
         if ranked is None or ranked.empty:
             continue
-        label = "Phase 2 Contextual" if mode == "contextual" else "Phase 3 CMDP"
+        label = (
+            "Mode 2 — Phase 2 Contextual"
+            if mode == "contextual"
+            else "Mode 3 — Phase 3 CMDP"
+        )
         sections.append(
             f"<h2>{escape(label)}</h2><p class=\"winner\">"
             f"{escape(winner_summary(ranked, mode))}</p>"
             f"<p><a href=\"{mode}/report.html\">Open the full {escape(label)} report</a></p>"
         )
+    if sweep_report is not None:
+        try:
+            sweep_href = sweep_report.relative_to(output).as_posix()
+        except ValueError:
+            sweep_href = sweep_report.as_posix()
+        sections.append(
+            "<h2>Mode 4 — Phase 3 CMDP Robustness Sweeps</h2>"
+            '<p class="note">Budget, group-imbalance, and fairness-strength '
+            "sweeps use only the existing Phase 3 CMDP policy family.</p>"
+            f'<p><a href="{escape(sweep_href)}">Open the full Mode 4 robustness report</a></p>'
+        )
     report = f"""<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Combined experiment summary</title><style>{REPORT_STYLE}</style></head>
-<body><h1>Combined experiment summary</h1>
-<p class="note">Phase 2 and Phase 3 have different budget and capital lifecycles, so each phase has its own winner and no cross-phase winner is declared.</p>
+<title>Mode 5 — Complete experiment suite</title><style>{REPORT_STYLE}
+table.arm-results th:first-child, table.arm-results td:first-child {{ text-align: left; }}
+</style></head>
+<body><h1>Mode 5 — Complete experiment suite</h1>
+<p class="note">Modes 1–4 have different policy families, budget semantics, and capital lifecycles. Results are collected in one directory, but each mode is interpreted separately and no cross-mode winner is declared.</p>
+<p><a href="combined_aggregate_results.csv">Open the Modes 1–3 combined aggregate table</a> · <a href="run_manifest.json">Open the Mode 5 reproducibility manifest</a></p>
 {''.join(sections)}</body></html>"""
     path = output / "report.html"
     path.write_text(report, encoding="utf-8")

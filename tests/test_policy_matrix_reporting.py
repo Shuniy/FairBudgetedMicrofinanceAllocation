@@ -300,9 +300,17 @@ def test_reports_include_grid_manifest_html_and_combined_links(tmp_path) -> None
     )
 
     combined = save_combined_report(
-        {"contextual": ranked, "cmdp": ranked}, tmp_path
+        {"contextual": ranked, "cmdp": ranked},
+        tmp_path,
+        arm_aggregate=aggregate,
+        sweep_report=tmp_path / "cmdp_robustness" / "report.html",
     )
     combined_text = combined.read_text(encoding="utf-8")
-    assert "no cross-phase winner" in combined_text
+    assert "no cross-mode winner" in combined_text
+    assert "Mode 1 — Arm Bandits" in combined_text
+    assert "Mode 4 — Phase 3 CMDP Robustness Sweeps" in combined_text
+    assert "combined_aggregate_results.csv" in combined_text
+    assert "run_manifest.json" in combined_text
     assert "contextual/report.html" in combined_text
     assert "cmdp/report.html" in combined_text
+    assert "cmdp_robustness/report.html" in combined_text

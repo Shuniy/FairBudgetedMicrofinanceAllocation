@@ -584,11 +584,11 @@ def _baseline_frames_match(
     return not errors, errors
 
 
-def validate_mode5_baselines(
+def validate_mode4_baselines(
     artifacts: Mapping[str, SweepArtifacts],
     output: Path,
 ) -> dict[str, object]:
-    """Verify that every Mode 5 default point reproduces Phase 3 exactly."""
+    """Verify that every Mode 4 default point reproduces Phase 3 exactly."""
 
     budget = artifacts["budget"].raw_results
     imbalance = artifacts["group_imbalance"].raw_results
@@ -623,7 +623,7 @@ def validate_mode5_baselines(
     )
     if not result["all_passed"]:
         raise RuntimeError(
-            "Mode 5 default points do not reproduce the Phase 3 baseline: "
+            "Mode 4 default points do not reproduce the Phase 3 baseline: "
             f"{result['differences']}"
         )
     return result
@@ -888,14 +888,14 @@ def _summary_table(artifact: SweepArtifacts) -> str:
     return f'<div class="table-scroll">{table}</div>'
 
 
-def save_mode5_report(
+def save_mode4_report(
     artifacts: Mapping[str, SweepArtifacts],
     output: Path,
     seeds: Sequence[int],
     quick_test: bool,
     baseline_consistency: Mapping[str, object],
 ) -> Path:
-    """Write the existing-style HTML report with a dedicated Mode 5 section."""
+    """Write the existing-style HTML report with a dedicated Mode 4 section."""
 
     labels = {
         "budget": "Budget Sensitivity",
@@ -980,7 +980,7 @@ def save_mode5_report(
     )
     report = f"""<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Phase 3 Robustness and Sensitivity Analysis — Mode 5</title>
+<title>Phase 3 Robustness and Sensitivity Analysis — Mode 4</title>
 <style>{REPORT_STYLE}
 h3 {{ color: #334e75; }}
 .plots {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(420px, 1fr)); gap: 1rem; }}
@@ -990,7 +990,7 @@ figcaption {{ font-size: .85rem; color: #4b5563; text-align: center; }}
 .table-scroll {{ max-width: 100%; overflow-x: auto; }}
 @media (max-width: 520px) {{ .plots {{ grid-template-columns: 1fr; }} }}
 </style></head><body>
-<h1>Phase 3 Robustness and Sensitivity Analysis — Mode 5</h1>
+<h1>Phase 3 Robustness and Sensitivity Analysis — Mode 4</h1>
 <p class="note">This report contains only the existing Phase 3 CMDP policy family. Phase 1 arm policies and Phase 2 contextual-bandit policies were not run. Opportunity counts remain the denominators for demographic parity. Feasibility screens are reported separately from whether a policy satisfied a feasible constraint.</p>
 <p><strong>Run type:</strong> {'quick smoke test' if quick_test else 'full experiment'}; <strong>seeds:</strong> {escape(', '.join(map(str, seeds)))}.</p>
 <p class="winner">Baseline consistency check: {'passed' if baseline_consistency.get('all_passed') else 'failed'}. The budget multiplier 1.0, marginalized probability 0.20, and policy-specific fairness strength 1.0 reproduce their matching standard Phase 3 policy/seed results.</p>

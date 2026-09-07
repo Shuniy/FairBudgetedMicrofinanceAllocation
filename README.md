@@ -48,8 +48,8 @@ python -m pip install -r requirements.txt
 python main.py --mode 1  # Phase 1: arm bandits
 python main.py --mode 2  # Phase 2: contextual bandits
 python main.py --mode 3  # Phase 3: contextual CMDP
-python main.py --mode 4  # all phases plus a combined metrics table
-python main.py --mode 5  # Phase 3 CMDP robustness/sensitivity sweeps
+python main.py --mode 4  # Phase 3 CMDP robustness/sensitivity sweeps
+python main.py --mode 5  # run Modes 1–4 and collect all reports
 ```
 
 The named forms `arm`, `contextual`, `cmdp`, `all`, and `sweeps` are equivalent.
@@ -92,13 +92,9 @@ Thompson sampling under unconstrained, hard-fair, and soft-fair selection. The
 existing non-budgeted, random, and oracle policies remain as baselines.
 
 Phase 3 writes the same summary/trajectory/aggregate files under `outputs/cmdp/`,
-plus `funding_log.csv`, `maturity_log.csv`, and portfolio-state plots. All mode
-writes each phase beneath `outputs/all/` and adds
-`combined_aggregate_results.csv`. Rankings in that table are within each mode;
-raw reward and cost scales are not assumed to be directly comparable across
-different phase lifecycles.
+plus `funding_log.csv`, `maturity_log.csv`, and portfolio-state plots.
 
-Mode 5 evaluates only the same 12 Phase 3 policies used by CMDP mode. Its full
+Mode 4 evaluates only the same 12 Phase 3 policies used by CMDP mode. Its full
 defaults use 10 common seeds and the following settings:
 
 - initial-capital multipliers: `0.50, 0.75, 1.00, 1.25, 1.50`;
@@ -117,7 +113,17 @@ and aggregate CSVs, configuration and summary JSON files, audit logs, plots, and
 `outputs/cmdp_robustness/report.html`. Run a small smoke matrix with:
 
 ```bash
-python main.py --mode 5 --quick-test --rounds 3
+python main.py --mode 4 --quick-test --rounds 3
+```
+
+Mode 5 sequentially runs Modes 1, 2, 3, and 4. Everything is collected beneath
+`outputs/all/`: the first three modes use `arm/`, `contextual/`, and `cmdp/`,
+Mode 4 uses `cmdp_robustness/`, and the root `report.html` links all reports and
+summarizes Mode 1. The root also contains `combined_aggregate_results.csv`.
+For a small end-to-end suite check, run:
+
+```bash
+python main.py --mode 5 --quick-test --rounds 3 --seeds 2
 ```
 
 Contextual and CMDP runs also write `ranked_results.csv`, `winner_summary.txt`,

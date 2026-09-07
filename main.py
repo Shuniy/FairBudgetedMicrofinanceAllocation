@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 from collections.abc import Mapping, Sequence
 from dataclasses import asdict, replace
 from pathlib import Path
@@ -65,8 +66,8 @@ from robustness import (
     QUICK_IMBALANCE_SWEEP_VALUES,
     CMDPSweepCase,
     run_cmdp_sweep,
-    save_mode5_report,
-    validate_mode5_baselines,
+    save_mode4_report,
+    validate_mode4_baselines,
 )
 
 
@@ -74,8 +75,8 @@ MODE_ALIASES = {
     "1": "arm",
     "2": "contextual",
     "3": "cmdp",
-    "4": "all",
-    "5": "sweeps",
+    "4": "sweeps",
+    "5": "all",
     "arm": "arm",
     "contextual": "contextual",
     "cmdp": "cmdp",
@@ -365,7 +366,7 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         "--mode",
         choices=tuple(MODE_ALIASES),
         help=(
-            "1/arm, 2/contextual, 3/cmdp, 4/all, or 5/sweeps; "
+            "1/arm, 2/contextual, 3/cmdp, 4/sweeps, or 5/all; "
             "omit for an interactive menu"
         ),
     )
@@ -395,7 +396,9 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--quick-test",
         action="store_true",
-        help="Mode 5 only: use two seeds and two values per sweep",
+        help=(
+            "Modes 4/5: use two seeds and two values for each robustness sweep"
+        ),
     )
     args = parser.parse_args(argv)
     if args.seeds <= 0:
@@ -425,8 +428,8 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         parser.error("--liquidity-reserve cannot be negative")
     if not 0.0 <= args.parity_tolerance <= 1.0:
         parser.error("--parity-tolerance must be in [0, 1]")
-    if args.quick_test and normalized_mode not in {None, "sweeps"}:
-        parser.error("--quick-test is only valid for Mode 5")
+    if args.quick_test and normalized_mode not in {None, "sweeps", "all"}:
+        parser.error("--quick-test is only valid for Modes 4 and 5")
     return args
 
 
@@ -626,18 +629,22 @@ def combine_aggregate_results(
 
 
 def run_all(args: argparse.Namespace):
-    """Run Phases 1, 2, and 3 and write a combined performance table."""
+    """Run Modes 1–4 and collect every result beneath one output root."""
 
     output = args.output or Path("outputs") / "all"
+    suite_args = args
+    if args.quick_test:
+        suite_args = argparse.Namespace(**vars(args))
+        suite_args.seeds = min(args.seeds, 2)
     results = {
-        "arm": run_arm(args, output / "arm"),
-        "contextual": run_contextual(args, output / "contextual"),
-        "cmdp": run_cmdp(args, output / "cmdp"),
+        "arm": run_arm(suite_args, output / "arm"),
+        "contextual": run_contextual(suite_args, output / "contextual"),
+        "cmdp": run_cmdp(suite_args, output / "cmdp"),
     }
     combined = combine_aggregate_results(results)
     output.mkdir(parents=True, exist_ok=True)
     combined.to_csv(output / "combined_aggregate_results.csv", index=False)
-    print("\nAll phases combined metrics:\n")
+    print("\nModes 1–3 combined metrics:\n")
     display_columns = [
         column
         for column in (
@@ -664,11 +671,41 @@ def run_all(args: argparse.Namespace):
         ),
         "cmdp": rank_results(
             results["cmdp"],
-            args.parity_tolerance,
+            suite_args.parity_tolerance,
             QUOTA_TOLERANCE,
         ),
     }
-    save_combined_report(ranked_results, output)
+    run_cmdp_sweeps(suite_args, output / "cmdp_robustness")
+    suite_manifest = {
+        "mode": 5,
+        "name": "complete_experiment_suite",
+        "included_modes": {
+            "1": "arm",
+            "2": "contextual",
+            "3": "cmdp",
+            "4": "cmdp_robustness_sweeps",
+        },
+        "quick_test": bool(args.quick_test),
+        "arguments": vars(suite_args),
+        "outputs": {
+            "mode_1": "arm",
+            "mode_2": "contextual",
+            "mode_3": "cmdp",
+            "mode_4": "cmdp_robustness",
+            "combined_aggregates": "combined_aggregate_results.csv",
+            "combined_report": "report.html",
+        },
+    }
+    (output / "run_manifest.json").write_text(
+        json.dumps(suite_manifest, indent=2, sort_keys=True, default=str) + "\n",
+        encoding="utf-8",
+    )
+    save_combined_report(
+        ranked_results,
+        output,
+        arm_aggregate=results["arm"],
+        sweep_report=output / "cmdp_robustness" / "report.html",
+    )
     print("\nPhase winners (not compared across phases):\n")
     print(winner_summary(ranked_results["contextual"], "contextual"))
     print(winner_summary(ranked_results["cmdp"], "cmdp"))
@@ -688,8 +725,11 @@ def _only_cmdp_fairness_family(
     }
 
 
-def run_cmdp_sweeps(args: argparse.Namespace):
-    """Run Mode 5 robustness experiments using only Phase 3 CMDP policies."""
+def run_cmdp_sweeps(
+    args: argparse.Namespace,
+    output: Path | None = None,
+):
+    """Run Mode 4 robustness experiments using only Phase 3 CMDP policies."""
 
     capital = args.budget if args.budget is not None else 600_000.0
     base_config = CMDPEnvironmentConfig(
@@ -718,7 +758,7 @@ def run_cmdp_sweeps(args: argparse.Namespace):
         if args.quick_test
         else FAIRNESS_SWEEP_VALUES
     )
-    destination = args.output or Path("outputs") / "cmdp_robustness"
+    destination = output or args.output or Path("outputs") / "cmdp_robustness"
     sweeps_output = destination / "sweeps"
     encoder = BorrowerFeatureEncoder(include_protected_attributes=False)
 
@@ -745,7 +785,7 @@ def run_cmdp_sweeps(args: argparse.Namespace):
         )
         for multiplier in budget_values
     ]
-    print("\nMode 5A: running Phase 3 budget sensitivity sweep...")
+    print("\nMode 4A: running Phase 3 budget sensitivity sweep...")
     budget_artifact = run_cmdp_sweep(
         "budget",
         budget_cases,
@@ -780,7 +820,7 @@ def run_cmdp_sweeps(args: argparse.Namespace):
         )
         for minority_share in imbalance_values
     ]
-    print("Mode 5B: running Phase 3 group-imbalance sweep...")
+    print("Mode 4B: running Phase 3 group-imbalance sweep...")
     imbalance_artifact = run_cmdp_sweep(
         "group_imbalance",
         imbalance_cases,
@@ -847,7 +887,7 @@ def run_cmdp_sweeps(args: argparse.Namespace):
                 is_baseline=bool(strength == 1.0),
             )
         )
-    print("Mode 5C: running Phase 3 fairness-strength sweep...")
+    print("Mode 4C: running Phase 3 fairness-strength sweep...")
     fairness_artifact = run_cmdp_sweep(
         "fairness_strength",
         fairness_cases,
@@ -864,8 +904,8 @@ def run_cmdp_sweeps(args: argparse.Namespace):
         "group_imbalance": imbalance_artifact,
         "fairness_strength": fairness_artifact,
     }
-    baseline_consistency = validate_mode5_baselines(artifacts, destination)
-    report = save_mode5_report(
+    baseline_consistency = validate_mode4_baselines(artifacts, destination)
+    report = save_mode4_report(
         artifacts,
         destination,
         seeds,
@@ -873,7 +913,7 @@ def run_cmdp_sweeps(args: argparse.Namespace):
         baseline_consistency,
     )
     episodes = sum(len(artifact.raw_results) for artifact in artifacts.values())
-    print(f"\nMode 5 completed {episodes} Phase 3 CMDP episodes.")
+    print(f"\nMode 4 completed {episodes} Phase 3 CMDP episodes.")
     print(f"Saved robustness outputs to: {destination.resolve()}")
     print(f"HTML report: {report.resolve()}")
     return artifacts
@@ -884,8 +924,8 @@ def prompt_for_mode() -> str:
     print("  1. Arm bandits on simulated mean/std borrower groups")
     print("  2. Contextual bandits on simulated borrower applications")
     print("  3. Stateful contextual CMDP")
-    print("  4. Run all phases and compare metrics")
-    print("  5. Phase 3 CMDP robustness sweeps")
+    print("  4. Phase 3 CMDP robustness sweeps")
+    print("  5. Run Modes 1–4 and collect all reports")
     try:
         choice = input("Selection [1-5]: ").strip().lower()
     except EOFError as exc:

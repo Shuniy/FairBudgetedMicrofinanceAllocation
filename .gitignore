@@ -3,6 +3,9 @@ __pycache__/
 .pytest_cache/
 outputs/
 .DS_Store
+*.tex
+*.bib
+.matplotlib
 
 ### Python ###
 # Byte-compiled / optimized / DLL files
