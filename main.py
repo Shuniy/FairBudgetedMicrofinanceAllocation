@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import random
 from collections.abc import Mapping, Sequence
 from dataclasses import asdict, replace
 from pathlib import Path
@@ -69,6 +70,45 @@ from robustness import (
     save_mode4_report,
     validate_mode4_baselines,
 )
+
+
+ROOT = Path(__file__).resolve().parent
+MASTER_SEED = 5726455
+OPTIONS = dict(
+    seeds=[10, 12, 15], rounds=[120, 150, 180, 210, 240],
+    arm_budget=[420, 500, 600, 780, 900, 1000],
+    budget=[420_000, 500_000, 600_000, 780_000, 900_000, 1_000_000],
+    pool_size=[16, 20, 24, 28, 32], feedback_delay=[2, 3, 4],
+    batch_size=[2, 3, 4, 5], repayment_delay=[5, 8, 11, 14],
+    recycle_fraction=[0.70, 0.80, 0.85, 0.90, 1.00],
+    default_recovery=[0.00, 0.10, 0.15, 0.20, 0.25],
+    liquidity_reserve=[10_000, 20_000, 30_000, 40_000],
+)
+
+
+def generate_scenarios(num_scenarios=10, master_seed=MASTER_SEED):
+    """Generate named, repeatable scenarios from the parameter options."""
+    if not 1 <= num_scenarios <= 10000:
+        raise ValueError("num_scenarios must be between 1 and 10000")
+    rng = random.Random(master_seed)
+    scenarios, used_blocks, used_configs = {}, set(), set()
+    for index in range(num_scenarios):
+        block = rng.randrange(100, 1_000_000)
+        while block in used_blocks:
+            block = rng.randrange(100, 1_000_000)
+        used_blocks.add(block)
+        cfg = {key: rng.choice(values) for key, values in OPTIONS.items()}
+        identity = tuple(cfg[key] for key in OPTIONS if key != "seeds")
+        while identity in used_configs:
+            cfg = {key: rng.choice(values) for key, values in OPTIONS.items()}
+            identity = tuple(cfg[key] for key in OPTIONS if key != "seeds")
+        used_configs.add(identity)
+        scenarios[f"scenario_{index + 1}"] = dict(seed_start=100 * block + 1, **cfg)
+    return scenarios
+
+
+# Generate ten scenarios from the parameter choices above.
+SCENARIOS = generate_scenarios(num_scenarios=10, master_seed=MASTER_SEED)
 
 
 MODE_ALIASES = {
@@ -711,6 +751,8 @@ def run_all(args: argparse.Namespace):
     print(winner_summary(ranked_results["contextual"], "contextual"))
     print(winner_summary(ranked_results["cmdp"], "cmdp"))
     print(f"\nSaved combined results to: {output.resolve()}")
+    # Run cross-configuration validation beneath the selected suite output.
+    run_all_scenarios(output / "all_scenarios")
     return combined
 
 
@@ -921,13 +963,58 @@ def run_cmdp_sweeps(
     return artifacts
 
 
+def run_scenario(name: str, output_root: Path = ROOT / "outputs") -> None:
+    """Run Modes 1–4 for one generated scenario."""
+    config = SCENARIOS[name]
+    destination = Path(output_root) / name
+    for mode, label, experiment in (
+        ("1", "arm", run_arm),
+        ("2", "contextual", run_contextual),
+        ("3", "cmdp", run_cmdp),
+        ("4", "cmdp_robustness", run_cmdp_sweeps),
+    ):
+        options = {key: value for key, value in config.items() if key != "arm_budget"}
+        if mode == "1":
+            options["budget"] = config["arm_budget"]
+        if mode != "2":
+            options["feedback_delay"] = 0
+        argv = ["--mode", mode]
+        for key, value in options.items():
+            argv.extend(["--" + key.replace("_", "-"), str(value)])
+        args = parse_args(argv)
+        phase_output = destination / label
+        phase_output.mkdir(parents=True, exist_ok=True)
+        print(f"Running {name}: {label} -> {phase_output.resolve()}", flush=True)
+        experiment(args, phase_output)
+        print(f"Completed {name}: {label}", flush=True)
+
+
+def run_all_scenarios(
+    output_root: Path = ROOT / "outputs" / "all_scenarios",
+) -> None:
+    """Run every generated scenario, creating its output folder up front."""
+    scenarios = list(SCENARIOS)
+    output_root = Path(output_root).resolve()
+    # Make every selected scenario visible before the first long experiment.
+    for scenario in scenarios:
+        (output_root / scenario).mkdir(parents=True, exist_ok=True)
+    print(
+        f"Running {len(scenarios)} scenario(s) sequentially in {output_root}: "
+        f"{', '.join(scenarios)}",
+        flush=True,
+    )
+    for index, scenario in enumerate(scenarios, start=1):
+        print(f"Scenario {index}/{len(scenarios)}: {scenario}", flush=True)
+        run_scenario(scenario, output_root)
+
+
 def prompt_for_mode() -> str:
     print("\nChoose an experiment:")
     print("  1. Arm bandits on simulated mean/std borrower groups")
     print("  2. Contextual bandits on simulated borrower applications")
     print("  3. Stateful contextual CMDP")
     print("  4. Phase 3 CMDP robustness sweeps")
-    print("  5. Run Modes 1–4 and collect all reports")
+    print("  5. Run Modes 1–4 with cross configuration validation and collect all reports")
     try:
         choice = input("Selection [1-5]: ").strip().lower()
     except EOFError as exc:

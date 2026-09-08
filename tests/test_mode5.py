@@ -146,6 +146,8 @@ def test_all_reuses_phase_paths_and_links_reports(tmp_path, monkeypatch, custom_
     if custom_output:
         cli.extend(["--output", str(output)])
     args = runner.parse_args(cli)
+    scenario_outputs = []
+    monkeypatch.setattr(runner, "run_all_scenarios", scenario_outputs.append)
     # Start with actual standalone results and verify the suite replaces them
     # in place, rather than leaving a stale table beside a second result tree.
     runner.run_arm(args, output / "arm")
@@ -153,6 +155,7 @@ def test_all_reuses_phase_paths_and_links_reports(tmp_path, monkeypatch, custom_
     summary.write_text("stale result\n")
     runner.run_all(args)
 
+    assert scenario_outputs == [output / "all_scenarios"]
     assert "policy" in pd.read_csv(summary).columns
     assert not (output / "all").exists()
     for phase in ("arm", "contextual", "cmdp"):
