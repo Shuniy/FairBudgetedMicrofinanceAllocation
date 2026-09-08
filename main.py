@@ -2,8 +2,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import subprocess
-import sys
 from collections.abc import Mapping, Sequence
 from dataclasses import asdict, replace
 from pathlib import Path
@@ -373,6 +371,7 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         ),
     )
     parser.add_argument("--seeds", type=int, default=10)
+    parser.add_argument("--seed-start", type=int, default=0)
     parser.add_argument("--rounds", type=int, default=150)
     parser.add_argument(
         "--budget",
@@ -464,7 +463,7 @@ def run_arm(
         environment_factory,
         build_arm_policy_factories(targets),
         targets,
-        list(range(args.seeds)),
+        list(range(args.seed_start, args.seed_start + args.seeds)),
     )
     destination = output or args.output or Path("outputs") / "arm"
     aggregate = save_results(summaries, trajectories, destination, "arm")
@@ -494,7 +493,7 @@ def run_contextual(
             encoder=encoder,
         )
 
-    seeds = list(range(args.seeds))
+    seeds = list(range(args.seed_start, args.seed_start + args.seeds))
     summaries, trajectories = compare_policies(
         environment_factory,
         build_contextual_policy_factories(targets),
@@ -554,7 +553,7 @@ def run_cmdp(
         default_recovery_fraction=args.default_recovery,
         minimum_liquidity_reserve=args.liquidity_reserve,
     )
-    seeds = list(range(args.seeds))
+    seeds = list(range(args.seed_start, args.seed_start + args.seeds))
     summaries, trajectories, funding_log, maturity_log = compare_cmdp_policies(
         env_config=config,
         policy_factories=build_cmdp_policy_factories(
@@ -712,12 +711,6 @@ def run_all(args: argparse.Namespace):
     print(winner_summary(ranked_results["contextual"], "contextual"))
     print(winner_summary(ranked_results["cmdp"], "cmdp"))
     print(f"\nSaved combined results to: {output.resolve()}")
-    root = Path(__file__).resolve().parent
-    subprocess.run(
-        [sys.executable, str(root / "sweep_test123" / "run_experiments.py"), "--all"],
-        cwd=root,
-        check=True,
-    )
     return combined
 
 
@@ -750,7 +743,8 @@ def run_cmdp_sweeps(
         default_recovery_fraction=args.default_recovery,
         minimum_liquidity_reserve=args.liquidity_reserve,
     )
-    seeds = list(range(min(args.seeds, 2) if args.quick_test else args.seeds))
+    seed_count = min(args.seeds, 2) if args.quick_test else args.seeds
+    seeds = list(range(args.seed_start, args.seed_start + seed_count))
     budget_values = (
         QUICK_BUDGET_SWEEP_VALUES
         if args.quick_test

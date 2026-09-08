@@ -55,6 +55,12 @@ python main.py --mode 5  # run Modes 1–4 and collect all reports
 The named forms `arm`, `contextual`, `cmdp`, `all`, and `sweeps` are equivalent.
 Running `python main.py` without `--mode` opens the same five-option menu.
 
+Run a named scenario with `python sweep_test123/run_experiments.py scenario_1`.
+The script defines ten editable scenario configurations and runs Modes 1–4 for
+the selected scenario, saving results under `outputs/scenario_1/` (or beneath
+`--output-root PATH`). Each scenario retains its original parameters and seed
+range. Runs start from the beginning; there is no batch tracking or resume logic.
+
 Shared options are `--seeds`, `--rounds`, `--budget`, and `--output`. Contextual
 mode also accepts `--pool-size` and `--feedback-delay`. CMDP mode accepts
 `--pool-size`, `--batch-size`, `--repayment-delay`, `--recycle-fraction`,

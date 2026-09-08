@@ -140,8 +140,6 @@ def test_all_reuses_phase_paths_and_links_reports(tmp_path, monkeypatch, custom_
     import main as runner
 
     monkeypatch.chdir(tmp_path)
-    # The separate random scenario batch is outside this suite-path regression.
-    monkeypatch.setattr(runner.subprocess, "run", lambda *args, **kwargs: None)
     cli = ["--mode", "all", "--quick-test", "--rounds", "2", "--seeds", "1",
            "--pool-size", "4", "--batch-size", "1"]
     output = Path("custom") if custom_output else Path("outputs")
