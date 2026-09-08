@@ -91,7 +91,7 @@ def environment():
 
 
 def runner_hashes(root):
-    return {name: sha256(root / "outputs1" / name) for name in ("run_experiments.py", "experiment_batch.py")}
+    return {name: sha256(root / "sweep_test123" / name) for name in ("run_experiments.py", "experiment_batch.py")}
 
 
 def validate_provenance(root, plan):
@@ -129,7 +129,7 @@ def prepare_plan(root, output, count=10, seed=MASTER_SEED, replace=False):
     snapshot = output / "reproducibility"
     snapshot.mkdir(exist_ok=True)
     for name in plan["runner_sha256"]:
-        shutil.copy2(root / "outputs1" / name, snapshot / name)
+        shutil.copy2(root / "sweep_test123" / name, snapshot / name)
     frozen = subprocess.run([sys.executable, "-m", "pip", "freeze"], capture_output=True, text=True, check=True)
     (output / "requirements_frozen.txt").write_text(frozen.stdout)
     return plan, path
@@ -221,7 +221,7 @@ def batch_report(plan, output):
         feasible = "n/a" if row["fairness_feasible"] is None else str(row["fairness_feasible"])
         passing = "n/a" if row["passing_seeds"] is None else f"{row['passing_seeds']}/{row['seeds']}"
         lines.append(f"| {row['scenario']} | {row['phase']} | {row['winner']} | {feasible} | {passing} | {row['raw_reward_leader']} | {row['raw_reward']:.3f} |")
-    lines += ["", "Run python outputs1/run_experiments.py --all to reproduce or resume this batch."]
+    lines += ["", "Run python sweep_test123/run_experiments.py --all to reproduce or resume this batch."]
     (output / "random_experiment_report.md").write_text("\n".join(lines) + "\n")
     return dict(scenario_count=len(checks), phase_episodes=phases, sweep_episodes=sweeps, total_episodes=phases+sweeps)
 
@@ -237,7 +237,7 @@ def run_all(root, plan, plan_path, output, workers):
             status["scenarios"][name] = "running"
             save_json(output / "batch_status.json", status)
         print(f"START {name}", flush=True)
-        command = [sys.executable, str(root / "outputs1/run_experiments.py"), name, "--plan", str(plan_path), "--output-root", str(output)]
+        command = [sys.executable, str(root / "sweep_test123/run_experiments.py"), name, "--plan", str(plan_path), "--output-root", str(output)]
         return subprocess.run(command).returncode
 
     with ThreadPoolExecutor(max_workers=workers) as pool:

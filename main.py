@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import argparse
 import json
+import subprocess
+import sys
 from collections.abc import Mapping, Sequence
 from dataclasses import asdict, replace
 from pathlib import Path
@@ -710,6 +712,12 @@ def run_all(args: argparse.Namespace):
     print(winner_summary(ranked_results["contextual"], "contextual"))
     print(winner_summary(ranked_results["cmdp"], "cmdp"))
     print(f"\nSaved combined results to: {output.resolve()}")
+    root = Path(__file__).resolve().parent
+    subprocess.run(
+        [sys.executable, str(root / "sweep_test123" / "run_experiments.py"), "--all"],
+        cwd=root,
+        check=True,
+    )
     return combined
 
 
