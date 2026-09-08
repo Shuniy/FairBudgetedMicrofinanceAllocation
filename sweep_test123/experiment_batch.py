@@ -126,10 +126,6 @@ def prepare_plan(root, output, count=10, seed=MASTER_SEED, replace=False):
                 source_sha256=source_hashes(root), runner_sha256=runner_hashes(root), environment=environment(),
                 created_utc=utc_now(), parity_tolerance=0.05, contextual_parity_tolerance=0.01, quota_tolerance=0.01)
     save_json(path, plan)
-    snapshot = output / "reproducibility"
-    snapshot.mkdir(exist_ok=True)
-    for name in plan["runner_sha256"]:
-        shutil.copy2(root / "sweep_test123" / name, snapshot / name)
     frozen = subprocess.run([sys.executable, "-m", "pip", "freeze"], capture_output=True, text=True, check=True)
     (output / "requirements_frozen.txt").write_text(frozen.stdout)
     return plan, path
@@ -208,7 +204,7 @@ def batch_report(plan, output):
     lines = [f"# Random experiment results: {len(checks)} scenarios", "",
              f"Master seed **{plan['master_seed']}**. Modes 1–4 completed with full sweep grids: **{phases:,} phase episodes**, **{sweeps:,} sweep episodes**, **{phases+sweeps:,} total executions**.", "",
              "Every scenario passed verification of seed/policy matrices, recomputed aggregates, sweep baseline consistency, fairness flags and artifact checksums. "
-             "The frozen plan, manifests, runner snapshots and requirements_frozen.txt retain reproducibility information. Sweep baseline repetitions count as executions, not independent evidence. "
+             "The frozen plan, manifests and requirements_frozen.txt retain reproducibility information. Sweep baseline repetitions count as executions, not independent evidence. "
              "Different scenarios jointly vary multiple parameters; absolute reward totals across scenarios are not estimates of policy improvement.", "",
              "| Scenario | Seeds | Rounds | Arm budget | Borrower capital | Pool | Loans/round | Repayment delay | Recycling |",
              "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |"]

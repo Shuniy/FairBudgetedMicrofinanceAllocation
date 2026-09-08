@@ -745,7 +745,8 @@ def run_cmdp_sweep(
     aggregate = aggregate_sweep_results(raw)
     output.mkdir(parents=True, exist_ok=True)
     raw.to_csv(output / "raw_results.csv", index=False)
-    raw.to_csv(output / "episode_summaries.csv", index=False)
+    # Retire the duplicate filename when rerunning an older sweep directory.
+    (output / "episode_summaries.csv").unlink(missing_ok=True)
     aggregate.to_csv(output / "aggregate_results.csv", index=False)
     for frames, filename in (
         (trajectory_frames, "trajectories.csv"),

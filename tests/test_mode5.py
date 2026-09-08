@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
+import pytest
 
 from Data.feature_encoder import BorrowerFeatureEncoder
 from evaluate import compare_cmdp_policies
@@ -51,6 +53,8 @@ def test_tidy_sweep_aggregation_includes_std_and_ci95() -> None:
 
 
 def test_mode5_default_case_matches_standard_cmdp_and_saves_outputs(tmp_path) -> None:
+    # A rerun must retire the duplicate left by earlier versions.
+    (tmp_path / "episode_summaries.csv").write_text("legacy duplicate\n")
     encoder = BorrowerFeatureEncoder(include_protected_attributes=False)
     config = CMDPEnvironmentConfig(
         initial_capital=120_000,
@@ -114,6 +118,12 @@ def test_mode5_default_case_matches_standard_cmdp_and_saves_outputs(tmp_path) ->
         "maturity_log.csv",
     ):
         assert (tmp_path / filename).exists()
+    assert not (tmp_path / "episode_summaries.csv").exists()
+    pd.testing.assert_frame_equal(
+        pd.read_csv(tmp_path / "raw_results.csv"),
+        artifact.raw_results,
+        check_dtype=False,
+    )
     manifest = json.loads((tmp_path / "config.json").read_text(encoding="utf-8"))
     assert manifest["policies"] == ["portfolio_linucb"]
     assert manifest["seeds"] == [0, 1]
@@ -123,3 +133,39 @@ def test_mode5_default_case_matches_standard_cmdp_and_saves_outputs(tmp_path) ->
         "constraint_satisfied",
         "policy_constraint_violation",
     }
+
+
+@pytest.mark.parametrize("custom_output", [False, True])
+def test_all_reuses_phase_paths_and_links_reports(tmp_path, monkeypatch, custom_output):
+    import main as runner
+
+    monkeypatch.chdir(tmp_path)
+    # The separate random scenario batch is outside this suite-path regression.
+    monkeypatch.setattr(runner.subprocess, "run", lambda *args, **kwargs: None)
+    cli = ["--mode", "all", "--quick-test", "--rounds", "2", "--seeds", "1",
+           "--pool-size", "4", "--batch-size", "1"]
+    output = Path("custom") if custom_output else Path("outputs")
+    if custom_output:
+        cli.extend(["--output", str(output)])
+    args = runner.parse_args(cli)
+    # Start with actual standalone results and verify the suite replaces them
+    # in place, rather than leaving a stale table beside a second result tree.
+    runner.run_arm(args, output / "arm")
+    summary = output / "arm" / "episode_summaries.csv"
+    summary.write_text("stale result\n")
+    runner.run_all(args)
+
+    assert "policy" in pd.read_csv(summary).columns
+    assert not (output / "all").exists()
+    for phase in ("arm", "contextual", "cmdp"):
+        assert (output / phase / "episode_summaries.csv").exists()
+    for sweep in ("budget", "group_imbalance", "fairness_strength"):
+        directory = output / "cmdp_robustness" / "sweeps" / sweep
+        assert (directory / "raw_results.csv").exists()
+        assert not (directory / "episode_summaries.csv").exists()
+    report = (output / "report.html").read_text()
+    for relative in ("arm/aggregate_results.csv", "contextual/report.html",
+                     "cmdp/report.html", "cmdp_robustness/report.html",
+                     "combined_aggregate_results.csv", "run_manifest.json"):
+        assert relative in report
+        assert (output / relative).exists()

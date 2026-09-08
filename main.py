@@ -631,9 +631,9 @@ def combine_aggregate_results(
 
 
 def run_all(args: argparse.Namespace):
-    """Run Modes 1–4 and collect every result beneath one output root."""
+    """Run Modes 1–4 using their shared output directories."""
 
-    output = args.output or Path("outputs") / "all"
+    output = args.output or Path("outputs")
     suite_args = args
     if args.quick_test:
         suite_args = argparse.Namespace(**vars(args))

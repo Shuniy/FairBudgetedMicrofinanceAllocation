@@ -116,10 +116,16 @@ and aggregate CSVs, configuration and summary JSON files, audit logs, plots, and
 python main.py --mode 4 --quick-test --rounds 3
 ```
 
-Mode 5 sequentially runs Modes 1, 2, 3, and 4. Everything is collected beneath
-`outputs/all/`: the first three modes use `arm/`, `contextual/`, and `cmdp/`,
-Mode 4 uses `cmdp_robustness/`, and the root `report.html` links all reports and
-summarizes Mode 1. The root also contains `combined_aggregate_results.csv`.
+Mode 5 sequentially runs Modes 1, 2, 3, and 4. It reuses the standalone paths
+`outputs/arm/`, `outputs/contextual/`, `outputs/cmdp/`, and
+`outputs/cmdp_robustness/`, overwriting their results with the current run.
+It does not create an `outputs/all/` directory or skip computation based on
+existing files. `outputs/report.html` links all reports and summarizes Mode 1;
+the root also contains `combined_aggregate_results.csv` and `run_manifest.json`.
+With `--output PATH`, Mode 5 uses these same subdirectory names beneath `PATH`.
+Sweep summaries are saved only as `raw_results.csv`; rerunning a sweep removes
+its legacy duplicate `episode_summaries.csv`. Modes 1–3 continue to use
+`episode_summaries.csv`.
 For a small end-to-end suite check, run:
 
 ```bash
