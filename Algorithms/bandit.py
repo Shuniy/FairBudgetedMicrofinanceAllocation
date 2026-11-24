@@ -28,6 +28,12 @@ class BasePolicy(ABC):
     def update(self, feedback: FeedbackEvent) -> None:
         raise NotImplementedError
 
+    def _scores_for_options(
+        self, env: BanditEnvironment, options: list[int]
+    ) -> np.ndarray:
+        """Compute selection scores once the eligible options are known."""
+        return self.scores(env)
+
     def select_action(
         self,
         env: BanditEnvironment,
@@ -39,13 +45,12 @@ class BasePolicy(ABC):
         options = [index for index in options if index in feasible]
         if not options:
             raise RuntimeError("No feasible action available")
-        action_scores = self.scores(env)
+        action_scores = self._scores_for_options(env, options)
         best_value = max(action_scores[index] for index in options)
         best = [
             index
             for index in options
             if np.isclose(action_scores[index], best_value)
-            or (np.isinf(action_scores[index]) and np.isinf(best_value))
         ]
         return int(self.rng.choice(best))
 

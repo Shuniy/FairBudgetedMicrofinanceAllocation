@@ -99,7 +99,7 @@ class HardFairPolicy(_FairPolicy):
 
 
 class SoftFairPolicy(_FairPolicy):
-    """Quota first, base utility second, funding-rate parity third."""
+    """Add a current quota-shortfall bonus to finite base scores."""
     def __init__(
         self,
         base_policy: BasePolicy,
@@ -113,7 +113,7 @@ class SoftFairPolicy(_FairPolicy):
         super().__init__(base_policy, target_shares, seed)
 
     def scores(self, env: BanditEnvironment) -> np.ndarray:
-        """Compute scores with penalties for quota deficits."""
+        """Compute scores with bonuses for quota deficits."""
         scores = self.base_policy.scores(env).copy()
         shares = allocation_shares(env.group_funding_counts)
         for index, group in enumerate(env.current_groups()):

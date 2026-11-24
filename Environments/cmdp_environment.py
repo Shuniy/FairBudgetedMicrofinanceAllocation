@@ -132,7 +132,7 @@ class StatefulMicrofinanceCMDPEnv:
         return tuple(candidate.fairness_group for candidate in self.current_pool)
 
     def true_probabilities(self) -> np.ndarray:
-        """Evaluator-only probabilities used by the oracle policy."""
+        """Evaluator-only probabilities used by the informed portfolio heuristic."""
 
         return np.asarray(
             [

@@ -184,7 +184,7 @@ class ContextualThompsonSamplingPolicy(ContextualPolicy):
 
 
 class TrueRewardContextualPolicy(ContextualPolicy):
-    """Evaluation-only policy that can see hidden repayment probabilities."""
+    """Informed greedy benchmark using true repayment, per cost by default."""
 
     def __init__(
         self, n_features: int, budget_aware: bool = True, seed: int = 0

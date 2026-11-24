@@ -60,7 +60,6 @@ class CMDPPolicy(ABC):
             index
             for index in options
             if np.isclose(scores[index], best_value)
-            or (np.isinf(scores[index]) and np.isinf(best_value))
         ]
         return int(self.rng.choice(best))
 
@@ -275,7 +274,7 @@ class PortfolioAwareThompsonPolicy(CMDPPolicy):
 
 
 class OraclePortfolioPolicy(CMDPPolicy):
-    """Evaluator-only benchmark using hidden repayment probabilities."""
+    """Informed portfolio-aware heuristic using hidden repayment probabilities."""
 
     def __init__(
         self,
@@ -355,9 +354,9 @@ class HardFairCMDPPolicy(CMDPPolicy):
         env: StatefulMicrofinanceCMDPEnv,
         candidates: Sequence[int] | None = None,
     ) -> int | None:
-        feasible = sorted(
-            env.feasible_actions() if candidates is None else candidates
-        )
+        feasible_set = set(env.feasible_actions())
+        feasible = sorted(feasible_set if candidates is None else candidates)
+        feasible = [index for index in feasible if index in feasible_set]
         if not feasible:
             return None
         groups = env.current_groups()

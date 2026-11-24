@@ -56,7 +56,7 @@ Imagine having enough money to fund only some of the applications on your desk. 
 | Episode | One policy's complete experiment with one random seed. |
 | Seed | A number that makes random draws reproducible under the same code, configuration, and software environment. |
 | Horizon | The maximum number of rounds. It is a simulation time limit, not necessarily a number of days. |
-| Oracle / true-reward benchmark | A comparison policy allowed to use repayment probabilities hidden from ordinary learners. |
+| Informed benchmark | A comparison policy allowed to use repayment probabilities hidden from ordinary learners. |
 
 Each episode starts with a fresh budget and fresh learning state. Ten seeds mean ten separate trials, not ten stages of one trained model. Policies can consume random draws differently, so using the same seed does not guarantee identical applicant sequences across policies.
 
@@ -228,10 +228,10 @@ In [Algorithms/bandit.py](Algorithms/bandit.py), `ArmPolicy` tracks trial counts
 | `reward_per_cost` | Try untested groups, then prefer estimated repayments per budget unit. |
 | `budgeted_ucb` | Divide UCB's optimistic reward score by current cost to combine learning and efficiency. |
 | `fractional_kube` | Uses the same score as Budgeted UCB in this implementation. |
-| `kube` | Approximate a budget-fitting mix of loans using rounded costs, then sample a group in proportion to that mix. Replan after funding one loan. |
+| `kube` | KUBE-style adaptation that computes a mix using rounded costs and samples a group in proportion to that mix. Replan after funding one loan. |
 | `fair_ucb_hard` | Apply quota/parity selection restrictions around Budgeted UCB. |
 | `fair_ucb_soft` | Add `2 × quota shortfall` to Budgeted UCB scores to encourage underserved groups. |
-| `true_reward_per_cost` | Use true repayment chance divided by current cost; an informed benchmark. |
+| `true_reward_per_cost` | Informed greedy true reward-per-cost benchmark. |
 
 All policies obey affordability. Cost-aware policies additionally use cost to decide *which* affordable option to prefer. UCB's bonus is `sqrt(2 × ln(max(2, t + 1)) / n)`, where `n` is that group's observed count and `t` is the total number of updates. Untested groups receive infinite scores to encourage initial exploration.
 
@@ -257,7 +257,9 @@ Across ten seeds, [the aggregate results](outputs/arm/aggregate_results.csv) sho
 | `fair_ucb_hard` | 54.5 | 62.23% | 0.0911 | 93.33% |
 | `epsilon_greedy` | 41.0 | 70.62% | 0.0685 | 33.33% |
 
-Why can a lower repayment percentage produce more repayments? Using mean costs, C offers `0.50 / 4 = 0.125` expected successes per unit, whereas A offers `0.80 / 12 ≈ 0.0667`. Cheaper loans permit more trials. The identical Budgeted UCB/Fractional KUBE results reflect their matching scoring rules. The oracle is a greedy benchmark, not a guarantee of globally optimal decisions.
+Why can a lower repayment percentage produce more repayments? Using mean costs, C offers `0.50 / 4 = 0.125` expected successes per unit, whereas A offers `0.80 / 12 ≈ 0.0667`. Cheaper loans permit more trials. The identical Budgeted UCB/Fractional KUBE results reflect their matching scoring rules. The informed greedy benchmark ranks the offers available at each decision.
+
+The saved tables are from the original runs. Correcting forced initial exploration can change the epsilon-greedy and decaying epsilon-greedy trajectories.
 
 ## Phase 2: learn from individual applications — Mode 2
 
@@ -302,7 +304,7 @@ All three learning families use the same type of ridge learner. Their exploratio
 | LinUCB | Choose predicted reward plus an uncertainty bonus based on how well the features have been observed. The runner uses bonus coefficient `alpha = 0.70`. |
 | Contextual Thompson sampling | Sample plausible feature weights, then choose using their predicted rewards. The runner uses sampling scale `0.30`. |
 
-The 14 saved policies comprise random and true-reward/cost baselines, three ordinary learning policies, three `budgeted_...` policies, and six fairness variants. Budgeted variants divide reward scores by loan cost. `fair_epsilon_greedy_hard/soft`, `fair_linucb_hard/soft`, and `fair_thompson_hard/soft` wrap the budgeted learners. Hard wrappers restrict choices for fairness; soft wrappers add a quota-shortfall bonus with coefficient 0.015. The ordinary names are `contextual_epsilon_greedy`, `linucb`, and `contextual_thompson`.
+The 14 saved policies comprise a random baseline, the informed greedy true reward-per-cost benchmark (`true_contextual_reward_per_cost`), three ordinary learning policies, three `budgeted_...` policies, and six fairness variants. Budgeted variants divide reward scores by loan cost. `fair_epsilon_greedy_hard/soft`, `fair_linucb_hard/soft`, and `fair_thompson_hard/soft` wrap the budgeted learners. Hard wrappers restrict choices for fairness and soft wrappers add a quota-shortfall bonus with coefficient 0.015. The ordinary names are `contextual_epsilon_greedy`, `linucb`, and `contextual_thompson`.
 
 ### Read a saved example
 
@@ -327,7 +329,7 @@ All three have mean quota satisfaction 1.0. **No policy in this saved Phase 2 co
 
 **Purpose:** account for time and outstanding loans. Lending reduces cash now; repayments later return some cash for reuse. Defaults reduce capital.
 
-CMDP means **Constrained Markov Decision Process**: decisions change a persistent state, and the policy works with constraints. Here the state includes cash, outstanding principal, recent repayments, and fairness counts. The implementation uses portfolio-aware scoring and fairness wrappers; it does not solve an optimal CMDP with a full dynamic-programming planner.
+A **Constrained Markov Decision Process (CMDP)** describes lending decisions with persistent capital, a current applicant pool, outstanding loan records and maturity times, and fairness counts. The policies use heuristic scores based on observable information. The [mathematical formulation](MATHEMATICAL_FORMULATION.md#phase-3-cmdp) gives the event order, capital transition, and constraints.
 
 ### Follow this command from start to finish
 
@@ -395,7 +397,7 @@ At round end, Lagrangian policies update their fairness penalty weights. Advanci
 | `portfolio_thompson` | Sample plausible prediction weights, then subtract a capital-use penalty. |
 | `cmdp_fair_hard_...` | Wrap epsilon-greedy, LinUCB, or Thompson with quota/parity selection restrictions: three policies. |
 | `cmdp_fair_lagrangian_...` | Wrap the same three families with adaptive penalties for projected fairness violations: three policies. |
-| `oracle_portfolio` | Use hidden repayment probabilities and a capital-use penalty; informed benchmark. |
+| `oracle_portfolio` | Informed Portfolio-Aware Heuristic. It subtracts a liquidity-dependent capital-use penalty from the true repayment probability. |
 
 For portfolio LinUCB, the score is approximately:
 
@@ -404,7 +406,7 @@ predicted reward + uncertainty bonus
 − shadow price × (requested loan / median loan in the current pool)
 ```
 
-A **shadow price** is the score penalty for tying up cash. For portfolio LinUCB and epsilon-greedy, it increases with liquidity pressure and default losses, while principal due soon provides relief. Thompson and the oracle use a simpler liquidity-dependent penalty. Portfolio state affects selection scores; it is not appended to the borrower's 28-feature ridge model.
+A **shadow price** is the heuristic score penalty per unit of normalized loan cost. For portfolio LinUCB and epsilon-greedy, it increases with liquidity pressure and default losses, while principal due soon provides relief. Portfolio Thompson sampling and the Informed Portfolio-Aware Heuristic use a simpler liquidity-dependent penalty. The ridge model uses the borrower's 28 features.
 
 The Lagrangian wrapper normalizes base scores and subtracts penalties for projected quota deficits and parity excess. Its `lambda_quota` and `lambda_parity` weights adapt after a five-round warmup, starting at 0.20 with learning rate 0.20 and a cap of 8. Larger weights make fairness violations more costly to the selection rule.
 
@@ -431,7 +433,7 @@ From [ranked_results.csv](outputs/cmdp/ranked_results.csv), averaged over ten se
 | 3 | `cmdp_fair_hard_thompson` | 343.7 | 77.01% | 1.798 | 4.16 | Yes |
 | 5 | `oracle_portfolio` | 370.9 | 82.42% | 2.687 | 6.92 | No |
 
-The first policy wins under the configured ranking because it meets mean fairness thresholds and has the best reward per cost among feasible policies. The oracle has more repayments but misses parity. This is a ranking under specified objectives, not proof that one policy is best in every respect.
+The first policy ranks highest because it meets the mean fairness thresholds and has the best reward per cost among policies that meet them. The Informed Portfolio-Aware Heuristic has more repayments and exceeds the mean parity threshold.
 
 For `cmdp_fair_hard_linucb`, seed 0, [the episode summary](outputs/cmdp/episode_summaries.csv) gives a concrete capital example:
 

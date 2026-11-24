@@ -21,8 +21,13 @@ class EpsilonGreedyPolicy(BanditPolicy):
         super().__init__(n_arms=n_arms, seed=seed)
 
     def scores(self, env: BanditEnvironment) -> np.ndarray:
-        """Compute the scores for each arm based on the epsilon-greedy strategy."""
-        if self.force_initial_exploration and np.any(self.counts == 0):
+        """Score arms for an unrestricted choice among feasible actions."""
+        return self._scores_for_options(env, env.feasible_actions())
+
+    def _scores_for_options(
+        self, env: BanditEnvironment, options: list[int]
+    ) -> np.ndarray:
+        if self.force_initial_exploration and np.any(self.counts[options] == 0):
             return np.where(self.counts == 0, np.inf, -np.inf)
         if self.rng.random() < self.epsilon:
             return self.rng.random(self.n_arms)
@@ -49,10 +54,12 @@ class DecayingEpsilonGreedyPolicy(EpsilonGreedyPolicy):
         self.decay_rate = decay_rate
         super().__init__(n_arms=n_arms, epsilon=initial_epsilon, seed=seed)
 
-    def scores(self, env: BanditEnvironment) -> np.ndarray:
+    def _scores_for_options(
+        self, env: BanditEnvironment, options: list[int]
+    ) -> np.ndarray:
         """Compute the scores for each arm based on the decaying epsilon-greedy strategy."""
         self.epsilon = max(
             self.minimum_epsilon,
             self.initial_epsilon / (1.0 + self.decay_rate * self.total_updates),
         )
-        return super().scores(env)
+        return super()._scores_for_options(env, options)

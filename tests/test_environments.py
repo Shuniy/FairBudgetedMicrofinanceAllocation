@@ -131,12 +131,14 @@ def test_contextual_feedback_delay_and_pool_renewal() -> None:
         contextual_config(feedback_delay_rounds=2), BorrowerFeatureEncoder()
     )
     first_ids = [candidate.borrower.id for candidate in env.current_pool]
+    first_context = env.current_pool[env.feasible_actions()[0]].context.copy()
     first = env.step(env.feasible_actions()[0])
     assert not first.observed_feedback
     assert [candidate.borrower.id for candidate in env.current_pool] != first_ids
     env.step(env.feasible_actions()[0])
     third = env.step(env.feasible_actions()[0])
     assert len(third.observed_feedback) == 1
+    np.testing.assert_array_equal(third.observed_feedback[0].context, first_context)
     assert env.spent_budget <= env.config.total_budget + 1e-8
 
 
