@@ -78,6 +78,7 @@ def test_runner_accepts_five_numeric_and_named_modes() -> None:
     assert parse_args(["--mode", "1"]).mode == "1"
     assert parse_args(["--mode", "contextual"]).mode == "contextual"
     assert parse_args(["--mode", "3"]).mode == "3"
+    assert parse_args(["--mode", "3", "--repayment-delay", "0"]).repayment_delay == 0
     assert parse_args(["--mode", "all"]).mode == "all"
     assert parse_args(["--mode", "5"]).mode == "5"
     assert parse_args(["--mode", "sweeps", "--quick-test"]).mode == "sweeps"

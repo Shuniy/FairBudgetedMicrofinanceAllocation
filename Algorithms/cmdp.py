@@ -9,6 +9,7 @@ from Algorithms.contextual import LinearRidgeModel
 from Environments.cmdp_environment import StatefulMicrofinanceCMDPEnv
 from metrics import demographic_parity_gap, group_funding_rates, total_quota_deficit
 from models.fairness_config import LagrangianConfig
+from simulation import policy_rng
 
 
 class CMDPPolicy(ABC):
@@ -22,7 +23,7 @@ class CMDPPolicy(ABC):
         self.reset()
 
     def reset(self) -> None:
-        self.rng = np.random.default_rng(self.seed)
+        self.rng = policy_rng(self.seed)
         self.total_updates = 0
 
     @abstractmethod

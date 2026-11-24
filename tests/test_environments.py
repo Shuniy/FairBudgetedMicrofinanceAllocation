@@ -27,7 +27,15 @@ def test_arm_environment_is_seeded_and_never_overspends() -> None:
     second = ArmBanditEnvironment(arms, config)
     assert np.allclose(first.current_costs(), second.current_costs())
     while not first.done:
-        first.step(first.feasible_actions()[0])
+        feasible = first.feasible_actions()
+        if feasible:
+            first.step(feasible[0])
+        else:
+            first.advance_round()
+        disbursed = sum(row["cost"] for row in first.history)
+        assert disbursed <= config.total_budget + 1e-8
+        assert first.remaining_budget >= 0
+        assert first.remaining_budget == pytest.approx(config.total_budget - disbursed)
     assert first.spent_budget <= config.total_budget + 1e-8
     assert sum(first.group_opportunity_counts.values()) >= first.total_allocations
 
@@ -39,6 +47,19 @@ def test_arm_opportunities_only_include_affordable_groups() -> None:
     )
     assert env.feasible_actions() == [0]
     assert env.group_opportunity_counts == {"A": 1, "B": 0}
+
+
+def test_arm_rejects_even_a_floating_point_overdraw() -> None:
+    env = BanditEnvironment.for_arms(
+        [ArmSpec("over", "A", 1.0, np.nextafter(10.0, np.inf)),
+         ArmSpec("exact", "B", 1.0, 10.0)],
+        EnvironmentConfig(10.0, 2),
+    )
+    with pytest.raises(ValueError, match="affordable"):
+        env.step(0)
+    assert env.remaining_budget == 10.0 and not env.history
+    assert env.step(1).cost == 10.0
+    assert env.remaining_budget == 0 and env.done
 
 
 def test_canonical_arm_environment_preserves_seeded_behavior() -> None:
@@ -56,7 +77,7 @@ def test_canonical_arm_environment_preserves_seeded_behavior() -> None:
     assert canonical.n_actions == canonical.n_arms == 3
     assert canonical.current_contexts() is None
     assert canonical.current_costs() == pytest.approx(
-        [12.001476184028979, 8.238996430006775, 50.0]
+        [11.243918490505465, 9.17206770753708, 50.0]
     )
     assert canonical.group_opportunity_counts == {"shared": 1, "other": 0}
     assert np.allclose(canonical.current_costs(), legacy.current_costs())
@@ -135,10 +156,14 @@ def test_contextual_feedback_delay_and_pool_renewal() -> None:
     first = env.step(env.feasible_actions()[0])
     assert not first.observed_feedback
     assert [candidate.borrower.id for candidate in env.current_pool] != first_ids
-    env.step(env.feasible_actions()[0])
+    second = env.step(env.feasible_actions()[0])
+    assert env.round_index == 2
+    assert len(second.observed_feedback) == 1
+    assert second.observed_feedback[0].due_round == 2
+    assert second.observed_feedback[0].applicant_id == first.identifier
+    np.testing.assert_array_equal(second.observed_feedback[0].context, first_context)
     third = env.step(env.feasible_actions()[0])
-    assert len(third.observed_feedback) == 1
-    np.testing.assert_array_equal(third.observed_feedback[0].context, first_context)
+    assert all(event.applicant_id != first.identifier for event in third.observed_feedback)
     assert env.spent_budget <= env.config.total_budget + 1e-8
 
 
@@ -154,7 +179,7 @@ def test_canonical_contextual_environment_matches_legacy_wrapper() -> None:
     assert np.allclose(canonical.context_matrix(), legacy.context_matrix())
     assert np.allclose(canonical.current_costs(), legacy.current_costs())
 
-    for expected_feedback_count in (0, 0, 1):
+    for expected_feedback_count in (0, 1, 1):
         canonical_result = canonical.step(canonical.feasible_actions()[0])
         legacy_result = legacy.step(legacy.feasible_actions()[0])
         assert canonical_result.identifier == legacy_result.identifier
@@ -171,4 +196,4 @@ def test_canonical_contextual_environment_matches_legacy_wrapper() -> None:
         assert np.allclose(canonical.current_costs(), legacy.current_costs())
 
     assert canonical.done
-    assert len(canonical.pending_feedback) == 2
+    assert len(canonical.pending_feedback) == 1

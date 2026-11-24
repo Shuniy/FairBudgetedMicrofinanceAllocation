@@ -77,7 +77,7 @@ def fixed_pool(monkeypatch):
     monkeypatch.setattr(SyntheticBorrowerGenerator, "generate_pool", generate_pool)
 
 
-def test_contextual_counts_the_terminal_pool_before_affordability(fixed_pool) -> None:
+def test_contextual_counts_all_horizon_pools_before_affordability(fixed_pool) -> None:
     env = BanditEnvironment.for_contextual(
         ContextualEnvironmentConfig(total_budget=40, max_rounds=3, pool_size=4)
     )
@@ -86,12 +86,12 @@ def test_contextual_counts_the_terminal_pool_before_affordability(fixed_pool) ->
     )
     first = report.trajectory.iloc[0]
     final = report.summary
-    assert len(report.trajectory) == 1
+    assert len(report.trajectory) == 3
     assert first["population_opportunities_disabled"] == 1
-    assert final["population_opportunities_disabled"] == 2
+    assert final["population_opportunities_disabled"] == 3
     assert final["opportunities_disabled"] == 1
     assert final["funded_disabled"] == 1
-    assert final["population_dp_gap"] == 0.50
+    assert final["population_dp_gap"] == pytest.approx(1 / 3)
     assert final["feasible_dp_gap"] == 1.0
     assert final["feasible_dp_groups"] == 2
     assert final["population_dp_groups"] == 4

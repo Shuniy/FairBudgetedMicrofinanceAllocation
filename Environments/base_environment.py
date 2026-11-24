@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections import defaultdict
 from collections.abc import Sequence
 from enum import Enum
+from types import SimpleNamespace
 from typing import Any
 
 import numpy as np
@@ -12,7 +13,7 @@ from models.arm_spec import ArmSpec
 from models.borrower_candidate import BorrowerCandidate
 from models.environment_config import ContextualEnvironmentConfig, EnvironmentConfig
 from models.events import FeedbackEvent, StepResult
-from simulation import SyntheticBorrowerGenerator
+from simulation import SyntheticBorrowerGenerator, environment_rngs
 
 
 class BanditMode(str, Enum):
@@ -129,7 +130,7 @@ class BanditEnvironment:
     def reset(self, seed: int | None = None) -> dict[str, Any]:
         """Reset the environment to its initial state."""
         actual_seed = self.config.seed if seed is None else seed
-        self.rng = np.random.default_rng(actual_seed)
+        self.rng, self._outcome_rng = environment_rngs(actual_seed)
         self.remaining_budget = float(self.config.total_budget)
         self.round_index = 0
         self.history = []
@@ -144,7 +145,12 @@ class BanditEnvironment:
             self.group_opportunity_counts = defaultdict(
                 int, {group: 0 for group in self.groups}
             )
-            self._current_costs = self._sample_arm_costs()
+            self._minimum_arm_cost = min(
+                self.config.minimum_cost
+                if arm.cost_std > 0
+                else max(self.config.minimum_cost, arm.cost_mean)
+                for arm in self.arms
+            )
         else:
             self.group_funding_counts = defaultdict(int)
             self.group_opportunity_counts = defaultdict(int)
@@ -153,14 +159,21 @@ class BanditEnvironment:
                 encoder=self.encoder,
                 rng=self.rng,
             )
+
+        self._done = False
+        self._prepare_round()
+        self._refresh_done_flag()
+        return self.observation()
+
+    def _prepare_round(self) -> None:
+        if self.mode == BanditMode.ARM:
+            self._current_costs = self._sample_arm_costs()
+        else:
             self.current_pool = self.generator.generate_pool(
                 self.contextual_config.pool_size
             )
-
-        self._done = False
+        self._outcome_draws = self._outcome_rng.random(self.n_actions)
         self._record_current_opportunities()
-        self._refresh_done_flag()
-        return self.observation()
 
     def _sample_arm_costs(self) -> np.ndarray:
         """Sample costs for each arm based on their mean and standard deviation."""
@@ -222,7 +235,7 @@ class BanditEnvironment:
         return [
             index
             for index, cost in enumerate(self.current_costs())
-            if cost <= self.remaining_budget + 1e-12
+            if 0 < cost <= self.remaining_budget
         ]
 
     def _record_current_opportunities(self) -> None:
@@ -261,6 +274,31 @@ class BanditEnvironment:
             )
         return observation
 
+    def policy_observation(self, *, informed: bool = False) -> SimpleNamespace:
+        """Snapshot the current decision without exposing simulator internals."""
+        observed = self.observation()
+        feasible = observed.pop("feasible_actions")
+        view = SimpleNamespace(
+            **observed,
+            mode=self.mode,
+            config=self.config,
+            total_allocations=self.total_allocations,
+            n_actions=len(observed["costs"]),
+            current_costs=lambda: observed["costs"],
+            current_groups=lambda: observed["groups"],
+            feasible_actions=lambda: feasible,
+        )
+        if self.mode == BanditMode.ARM:
+            view.n_arms = self.n_arms
+            view.groups = self.groups
+        else:
+            view.n_features = self.n_features
+            view.context_matrix = lambda: observed["contexts"]
+        if informed:
+            probabilities = self.true_probabilities()
+            view.true_probabilities = lambda: probabilities
+        return view
+
     def _release_due_feedback(self) -> tuple[FeedbackEvent, ...]:
         """Release feedback events that are due in the current round and remove them from the pending feedback list."""
         due = tuple(
@@ -278,8 +316,21 @@ class BanditEnvironment:
     def _refresh_done_flag(self) -> None:
         self._done = (
             self.round_index >= self.config.max_rounds
-            or not self.feasible_actions()
+            or (
+                self.mode == BanditMode.ARM
+                and self.remaining_budget < self._minimum_arm_cost
+            )
         )
+
+    def advance_round(self) -> tuple[FeedbackEvent, ...]:
+        """Advance the clock and release feedback due before the next decision."""
+        if self.done:
+            return ()
+        self.round_index += 1
+        self._refresh_done_flag()
+        if not self.done:
+            self._prepare_round()
+        return self._release_due_feedback()
 
     def _selected_choice(
         self, action: int
@@ -309,7 +360,7 @@ class BanditEnvironment:
         )
 
     def step(self, action: int) -> StepResult:
-        """Take a step in the environment by selecting an action (arm or borrower) and return the result."""
+        """Fund one action and return feedback released through the next round boundary."""
         if self.done:
             raise RuntimeError("Cannot step a completed environment")
         if action < 0 or action >= self.n_actions:
@@ -323,8 +374,8 @@ class BanditEnvironment:
             action
         )
         cost = float(self.current_costs()[action])
-        reward = float(self.rng.binomial(1, probability))
-        self.remaining_budget = max(0.0, self.remaining_budget - cost)
+        reward = float(self._outcome_draws[action] < probability)
+        self.remaining_budget -= cost
         if self.mode == BanditMode.ARM:
             self.arm_allocation_counts[action] += 1
         self.group_funding_counts[group] += 1
@@ -368,16 +419,7 @@ class BanditEnvironment:
                 "cost": cost,
             }
         )
-        self.round_index += 1
-        if self.mode == BanditMode.ARM:
-            self._current_costs = self._sample_arm_costs()
-            self._record_current_opportunities()
-        elif self.round_index < self.config.max_rounds:
-            self.current_pool = self.generator.generate_pool(
-                self.contextual_config.pool_size
-            )
-            self._record_current_opportunities()
-        self._refresh_done_flag()
+        observed += self.advance_round()
 
         return StepResult(
             round_index=result_round,

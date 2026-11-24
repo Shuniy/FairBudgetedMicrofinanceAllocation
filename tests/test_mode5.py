@@ -244,6 +244,10 @@ def test_mode5_default_case_matches_standard_cmdp_and_saves_outputs(tmp_path) ->
     assert manifest["policies"] == ["portfolio_linucb"]
     assert manifest["seeds"] == [0, 1]
     assert manifest["horizon"] == 3
+    assert manifest["simulation_version"] == 2
+    assert manifest["cases"][0]["policy_configurations"]["portfolio_linucb"][
+        "parameters"
+    ]["base_shadow_price"] == 0.22
     assert set(artifact.raw_results["feasibility_status"]) <= {
         "opportunity_infeasible",
         "parity_not_evaluable",

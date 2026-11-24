@@ -92,8 +92,8 @@ class CMDPEnvironmentConfig:
             raise ValueError("pool_size must be positive")
         if self.max_loans_per_round <= 0:
             raise ValueError("max_loans_per_round must be positive")
-        if self.repayment_delay_rounds < 1:
-            raise ValueError("repayment_delay_rounds must be at least one in Phase 3")
+        if self.repayment_delay_rounds < 0:
+            raise ValueError("repayment_delay_rounds cannot be negative")
         if not 0.0 <= self.recycle_fraction <= 1.0:
             raise ValueError("recycle_fraction must be in [0, 1]")
         if not 0.0 <= self.default_recovery_fraction <= 1.0:

@@ -2,18 +2,23 @@ from __future__ import annotations
 
 import json
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass, is_dataclass
 from html import escape
 from importlib.metadata import PackageNotFoundError, version
+from inspect import signature
 from pathlib import Path
 import platform
+import subprocess
+from types import SimpleNamespace
 
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 
 from Algorithms.bandit import BasePolicy
-from Algorithms.cmdp import CMDPPolicy, LagrangianFairCMDPPolicy
+from Algorithms.cmdp import CMDPPolicy, LagrangianFairCMDPPolicy, OraclePortfolioPolicy
+from Algorithms.contextual import TrueRewardContextualPolicy
+from Algorithms.true_repayment_cost import TrueRewardPerCostPolicy
 from Environments.base_environment import BanditEnvironment, BanditMode
 from Environments.cmdp_environment import StatefulMicrofinanceCMDPEnv
 from metrics import (
@@ -29,7 +34,6 @@ from metrics import (
     quota_satisfaction_rate,
     repayment_rate,
     reward_per_disbursed_capital,
-    reward_per_unit_cost,
 )
 from models.environment_config import CMDPEnvironmentConfig
 
@@ -123,6 +127,14 @@ class EpisodeResult:
     trajectory: pd.DataFrame
 
 
+def _uses_true_probabilities(policy: BasePolicy | CMDPPolicy) -> bool:
+    while hasattr(policy, "base_policy"):
+        policy = policy.base_policy
+    return isinstance(
+        policy, (TrueRewardPerCostPolicy, TrueRewardContextualPolicy, OraclePortfolioPolicy)
+    )
+
+
 def run_episode(
     env: BanditEnvironment,
     policy: BasePolicy,
@@ -140,63 +152,101 @@ def run_episode(
     env.reset(seed)
     policy.seed = env.config.seed if seed is None else seed
     policy.reset()
-    rows: list[dict[str, float | int | str]] = []
+    informed = _uses_true_probabilities(policy)
+    rows: list[dict[str, float | int | str | None]] = []
     cumulative_reward = 0.0
     cumulative_cost = 0.0
+    observed_reward = 0.0
+    feedback_at_round_start = ()
 
     while not env.done:
-        action = policy.select_action(env)
-        result = env.step(action)
-        for feedback in result.observed_feedback:
+        round_index = env.round_index
+        for feedback in feedback_at_round_start:
             policy.update(feedback)
-        cumulative_reward += result.reward
-        cumulative_cost += result.cost
-        decisions = result.round_index + 1
-        row: dict[str, float | int | str] = {
-            "round": result.round_index,
-            "selected_index": result.selected_index,
-            "identifier": result.identifier,
-            "fairness_group": result.group,
-            "reward": result.reward,
-            "cost": result.cost,
+            observed_reward += feedback.reward
+        observed_count = len(feedback_at_round_start)
+        row: dict[str, float | int | str | None] = {
+            "round": round_index,
+            "selected_index": None,
+            "identifier": None,
+            "fairness_group": None,
+            "reward": 0.0,
+            "cost": 0.0,
+        }
+        if env.feasible_actions():
+            action = policy.select_action(env.policy_observation(informed=informed))
+            result = env.step(action)
+            released = result.observed_feedback
+            funded = result.funding_counts
+            opportunities = result.opportunity_counts
+            population = result.population_opportunity_counts
+            cumulative_reward += result.reward
+            cumulative_cost += result.cost
+            row.update({
+                "selected_index": result.selected_index,
+                "identifier": result.identifier,
+                "fairness_group": result.group,
+                "reward": result.reward,
+                "cost": result.cost,
+            })
+            if result.true_repayment_probability is not None:
+                row["true_repayment_probability"] = result.true_repayment_probability
+            row.update({
+                key: value for key, value in result.metadata.items()
+                if isinstance(value, (str, int, float))
+            })
+        else:
+            funded = dict(env.group_funding_counts)
+            opportunities = dict(env.group_opportunity_counts)
+            population = dict(env.group_population_opportunity_counts)
+            released = env.advance_round()
+
+        for feedback in released:
+            if feedback.due_round == round_index:
+                policy.update(feedback)
+                observed_reward += feedback.reward
+                observed_count += 1
+        feedback_at_round_start = tuple(
+            feedback for feedback in released if feedback.due_round > round_index
+        )
+        row.update({
             "cumulative_reward": cumulative_reward,
+            "observed_cumulative_reward": observed_reward,
             "cumulative_cost": cumulative_cost,
-            "budget_remaining": result.budget_remaining,
+            "budget_remaining": env.remaining_budget,
             "budget_utilization": budget_utilization(
-                env.config.total_budget, result.budget_remaining
+                env.config.total_budget, env.remaining_budget
             ),
             "reward_per_cost": (
                 cumulative_reward / cumulative_cost if cumulative_cost else 0.0
             ),
-            "repayment_rate": cumulative_reward / decisions,
+            "repayment_rate": (
+                cumulative_reward / env.total_allocations if env.total_allocations else 0.0
+            ),
             **_fairness_metrics(
-                result.funding_counts,
-                result.opportunity_counts,
-                None if arm_mode else result.population_opportunity_counts,
+                funded,
+                opportunities,
+                None if arm_mode else population,
                 targets,
                 parity_tolerance,
                 quota_tolerance,
             ),
-            "observed_feedback_count": len(result.observed_feedback),
-        }
-        if result.true_repayment_probability is not None:
-            row["true_repayment_probability"] = result.true_repayment_probability
-        for key, value in result.metadata.items():
-            if isinstance(value, (str, int, float)):
-                row[key] = value
+            "observed_feedback_count": observed_count,
+        })
         rows.append(row)
 
+    observed_reward += sum(feedback.reward for feedback in feedback_at_round_start)
     trajectory = pd.DataFrame(rows)
-    rewards = (
-        trajectory["reward"].to_numpy() if not trajectory.empty else np.array([])
-    )
-    costs = trajectory["cost"].to_numpy() if not trajectory.empty else np.array([])
     summary: dict[str, float | int | str] = {
         "rounds": env.total_allocations,
-        "cumulative_reward": float(np.sum(rewards)),
-        "cumulative_cost": float(np.sum(costs)),
-        "reward_per_cost": reward_per_unit_cost(rewards, costs),
-        "repayment_rate": repayment_rate(rewards),
+        "decision_rounds": env.round_index,
+        "cumulative_reward": cumulative_reward,
+        "observed_reward_by_horizon": observed_reward,
+        "cumulative_cost": cumulative_cost,
+        "reward_per_cost": cumulative_reward / cumulative_cost if cumulative_cost else 0.0,
+        "repayment_rate": (
+            cumulative_reward / env.total_allocations if env.total_allocations else 0.0
+        ),
         "budget_utilization": budget_utilization(
             env.config.total_budget, env.remaining_budget
         ),
@@ -208,13 +258,28 @@ def run_episode(
             parity_tolerance,
             quota_tolerance,
         ),
-        "pending_feedback": len(getattr(env, "pending_feedback", [])),
+        "pending_feedback": len(env.pending_feedback),
     }
     return EpisodeResult(summary=summary, trajectory=trajectory)
 
 
 EnvironmentFactory = Callable[[int], BanditEnvironment]
-PolicyFactory = Callable[[BanditEnvironment, int], BasePolicy]
+PolicyFactory = Callable[[SimpleNamespace, int], BasePolicy]
+
+
+def _policy_configuration(policy: BasePolicy | CMDPPolicy) -> dict[str, object]:
+    """Record constructor settings from the actual policy, including any wrapper."""
+    parameters = {}
+    for name in signature(type(policy)).parameters:
+        if name == "seed" or not hasattr(policy, name):
+            continue
+        value = getattr(policy, name)
+        if isinstance(value, (BasePolicy, CMDPPolicy)):
+            value = _policy_configuration(value)
+        elif is_dataclass(value):
+            value = asdict(value)
+        parameters[name] = value
+    return {"class": type(policy).__name__, "parameters": parameters}
 
 
 def compare_policies(
@@ -229,10 +294,13 @@ def compare_policies(
     """Run episodes for each policy and seed, collecting summaries and trajectories."""
     summaries: list[dict[str, float | int | str]] = []
     trajectories: list[pd.DataFrame] = []
+    policy_configurations = {}
     for policy_name, factory in policy_factories.items():
         for seed in seeds:
             env = environment_factory(seed)
-            policy = factory(env, seed)
+            policy = factory(env.policy_observation(), seed)
+            if policy_name not in policy_configurations:
+                policy_configurations[policy_name] = _policy_configuration(policy)
             episode = run_episode(
                 env, policy, target_shares, seed,
                 parity_tolerance=parity_tolerance, quota_tolerance=quota_tolerance,
@@ -244,7 +312,9 @@ def compare_policies(
             trajectory["policy"] = policy_name
             trajectory["seed"] = seed
             trajectories.append(trajectory)
-    return pd.DataFrame(summaries), pd.concat(trajectories, ignore_index=True)
+    summary_frame = pd.DataFrame(summaries)
+    summary_frame.attrs["policy_configurations"] = policy_configurations
+    return summary_frame, pd.concat(trajectories, ignore_index=True)
 
 
 FAIRNESS_METRICS = (
@@ -270,6 +340,7 @@ FAIRNESS_COUNT_PREFIXES = ("funded_", "opportunities_", "population_opportunitie
 
 COMMON_METRICS = (
     "cumulative_reward",
+    "observed_reward_by_horizon",
     "cumulative_cost",
     "reward_per_cost",
     "repayment_rate",
@@ -408,6 +479,7 @@ def run_cmdp_episode(
     env.reset(seed)
     policy.seed = seed
     policy.reset()
+    informed = _uses_true_probabilities(policy)
     rows: list[dict[str, float | int | str]] = []
 
     while not env.done:
@@ -420,15 +492,20 @@ def run_cmdp_episode(
             )
 
         funded_this_round = 0
+        matured_this_round = len(matured_now)
         hidden_reward_this_round = 0.0
         disbursed_this_round = 0.0
-        while funded_this_round < env.config.max_loans_per_round:
-            action = policy.select_action(env)
+        while funded_this_round < env.config.max_loans_per_round and env.feasible_actions():
+            observation = env.policy_observation(informed=informed)
+            action = policy.select_action(observation)
             if action is None:
                 break
-            learning_context = policy.decision_context(env, action)
+            learning_context = policy.decision_context(observation, action)
             result = env.fund(action, learning_context)
+            for feedback in result.observed_feedback:
+                policy.update(feedback.learning_context, feedback.reward, feedback.principal)
             funded_this_round += 1
+            matured_this_round += len(result.observed_feedback)
             hidden_reward_this_round += result.hidden_reward
             disbursed_this_round += result.principal
 
@@ -437,11 +514,12 @@ def run_cmdp_episode(
             {
                 "round": env.round_index,
                 "funded_this_round": funded_this_round,
-                "matured_this_round": len(matured_now),
+                "matured_this_round": matured_this_round,
                 "hidden_reward_funded_this_round": hidden_reward_this_round,
                 "disbursed_this_round": disbursed_this_round,
                 "cumulative_funded": env.total_allocations,
                 "eventual_cumulative_reward": env.eventual_reward(),
+                "observed_cumulative_reward": env.observed_repayments,
                 "observed_repayments": env.observed_repayments,
                 "observed_defaults": env.observed_defaults,
                 "observed_repayment_rate": env.observed_repayment_rate,
@@ -452,6 +530,9 @@ def run_cmdp_episode(
                 "cumulative_disbursed": env.cumulative_disbursed,
                 "cumulative_recycled": env.cumulative_recycled,
                 "cumulative_default_loss": env.cumulative_default_loss,
+                "cumulative_unrecycled_successful_principal": (
+                    env.cumulative_unrecycled_successful_principal
+                ),
                 "capital_turnover": capital_turnover(
                     env.cumulative_disbursed,
                     env.config.initial_capital,
@@ -481,7 +562,7 @@ def run_cmdp_episode(
                 ),
             }
         )
-        policy.on_round_end(env)
+        policy.on_round_end(env.policy_observation(informed=informed))
         if env.advance_round().done:
             break
 
@@ -515,6 +596,9 @@ def run_cmdp_episode(
         ),
         "cumulative_recycled": env.cumulative_recycled,
         "default_loss_by_horizon": env.cumulative_default_loss,
+        "unrecycled_successful_principal_by_horizon": (
+            env.cumulative_unrecycled_successful_principal
+        ),
         "final_available_capital": env.available_capital,
         "final_capital_at_risk": env.capital_at_risk,
         "eventual_terminal_capital": eventual_terminal_capital,
@@ -569,11 +653,14 @@ def compare_cmdp_policies(
     trajectories: list[pd.DataFrame] = []
     funding_logs: list[pd.DataFrame] = []
     maturity_logs: list[pd.DataFrame] = []
+    policy_configurations = {}
 
     for policy_name, factory in policy_factories.items():
         for seed in seeds:
             env = StatefulMicrofinanceCMDPEnv(env_config, shared_encoder)
             policy = factory(shared_encoder.n_features, seed)
+            if policy_name not in policy_configurations:
+                policy_configurations[policy_name] = _policy_configuration(policy)
             episode = run_cmdp_episode(
                 env,
                 policy,
@@ -603,8 +690,10 @@ def compare_cmdp_policies(
             else pd.DataFrame()
         )
 
+    summary_frame = pd.DataFrame(summaries)
+    summary_frame.attrs["policy_configurations"] = policy_configurations
     return (
-        pd.DataFrame(summaries),
+        summary_frame,
         concat_or_empty(trajectories),
         concat_or_empty(funding_logs),
         concat_or_empty(maturity_logs),
@@ -616,10 +705,12 @@ CMDP_METRICS = (
     "cumulative_reward",
     "observed_reward_by_horizon",
     "repayment_rate",
+    "cumulative_disbursed",
     "reward_per_cost",
     "capital_turnover",
     "cumulative_recycled",
     "default_loss_by_horizon",
+    "unrecycled_successful_principal_by_horizon",
     "final_available_capital",
     "final_capital_at_risk",
     "eventual_terminal_capital",
@@ -841,6 +932,39 @@ def _package_versions() -> dict[str, str]:
     return versions
 
 
+def reproducibility_metadata() -> dict[str, object]:
+    """Metadata shared by standard evaluations and robustness sweeps."""
+    def git_output(*args: str) -> str | None:
+        try:
+            return subprocess.check_output(
+                ["git", "--no-optional-locks", *args],
+                cwd=Path(__file__).resolve().parent,
+                stderr=subprocess.DEVNULL,
+                text=True,
+                timeout=5,
+            ).strip()
+        except (OSError, subprocess.SubprocessError):
+            return None
+
+    status = git_output("status", "--porcelain")
+    return {
+        "simulation_version": 2,
+        "rng_convention": {
+            "generator": "NumPy default_rng (PCG64)",
+            "seed_derivation": "SeedSequence(episode seed), children 0, 1 and 2",
+            "opportunities": "Child 0 generates costs or applicant pools in round order",
+            "potential_outcomes": (
+                "Child 1 draws a uniform per arm or applicant in original round order; "
+                "repayment occurs when the draw is below the true probability"
+            ),
+            "policy": "Child 2 supplies exploration, sampling and tie-breaking",
+        },
+        "package_versions": _package_versions(),
+        "git_commit": git_output("rev-parse", "HEAD"),
+        "git_dirty": bool(status) if status is not None else None,
+    }
+
+
 def _mean_std_column(ranked: pd.DataFrame, metric: str) -> pd.Series:
     means = ranked[f"{metric}_mean"]
     standard_deviations = ranked.get(
@@ -935,6 +1059,8 @@ def save_evaluation_report(
     configuration: Mapping[str, object],
     policy_parameters: Mapping[str, object],
     quota_tolerance: float = QUOTA_TOLERANCE,
+    *,
+    policy_configurations: Mapping[str, object] | None = None,
 ) -> pd.DataFrame:
     """Rank results and persist reproducibility and human-readable reports."""
 
@@ -953,7 +1079,8 @@ def save_evaluation_report(
         },
         "configuration": dict(configuration),
         "policy_parameters": dict(policy_parameters),
-        "package_versions": _package_versions(),
+        "policy_configurations": dict(policy_configurations or {}),
+        **reproducibility_metadata(),
     }
     (output / "run_manifest.json").write_text(
         json.dumps(manifest, indent=2, sort_keys=True, default=str) + "\n",

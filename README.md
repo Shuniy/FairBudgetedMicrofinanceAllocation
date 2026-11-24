@@ -98,6 +98,10 @@ python main.py --mode 1 --seeds 1 --rounds 10 --output outputs/my_first_run
 
 Read this from left to right: `python` starts Python; `main.py` is the entry file; `--mode 1` chooses the group experiment; `--seeds 1` runs every policy once; `--rounds 10` allows at most ten decisions per episode; `--output` chooses the destination. A **flag** is an option beginning with `--`; its following value supplies the setting. This command still compares all 13 Phase 1 policies.
 
+Each episode seed creates three NumPy streams for offers, potential repayments, and policy decisions. The same seed and environment settings give policies the same offers and potential repayments. Affordability and the loans actually issued depend on each policy's decisions.
+
+The saved results and numerical examples below predate simulation version 2. Regenerate experimental outputs before using them as results from the current simulator.
+
 The ordinary phase commands are:
 
 ```bash
@@ -200,8 +204,8 @@ flowchart TD
     C --> D["compare_policies(): next policy and seed"]
     D --> E["BanditEnvironment.for_arms(); create policy"]
     E --> F["run_episode(): env.reset(); policy.reset()"]
-    F --> G["policy.select_action(env): choose affordable group index"]
-    G --> H["env.step(action): sample reward, spend cost, prepare next offers"]
+    F --> G["Choose an affordable group or advance without funding"]
+    G --> H["If funded, use the group's round outcome and charge its cost"]
     H --> I["StepResult → policy.update(feedback)"]
     I --> J["Record metrics"]
     J --> K{"env.done?"}
@@ -211,7 +215,7 @@ flowchart TD
     D -->|All episodes complete| M["save_results() → display_results()"]
 ```
 
-Read the loop as follows: `select_action()` asks which offers are affordable, scores them, and returns an integer such as `2`. `step(2)` funds Group C, draws a success/default, subtracts the cost, updates allocation counts, and returns feedback. `update()` lets the policy learn from that feedback. The evaluator records the round and repeats until the horizon or no current affordable offer remains.
+`select_action()` scores current offers and returns an affordable group index such as `2`. `step(2)` funds Group C, uses its round outcome, subtracts the cost, updates allocation counts and returns feedback. A round with no affordable offer advances without funding. The episode ends at the horizon or once the budget falls below the minimum possible cost across arms.
 
 In [Algorithms/bandit.py](Algorithms/bandit.py), `ArmPolicy` tracks trial counts, reward sums, and cost sums per group. Seven repayments from ten funded loans give an estimated repayment chance of `7 / 10 = 0.7`. That estimate is learned; it is distinct from the simulator's configured probability. Repayments **do not replenish the budget** in this phase.
 
@@ -269,7 +273,7 @@ The saved tables are from the original runs. Correcting forced initial explorati
 python main.py --mode 2
 ```
 
-Defaults: 600,000 budget units, 150 rounds, 20 fresh applicants per round, immediate feedback, and ten seeds. Fourteen policies × ten seeds gives **140 episodes**. Each round funds one affordable applicant; the remaining applicants are discarded when the next pool arrives.
+Defaults are 600,000 budget units, 150 rounds, 20 fresh applicants per round, immediate feedback, and ten seeds. Fourteen policies × ten seeds gives **140 episodes**. Each round funds at most one applicant. A fresh pool replaces the previous pool every round.
 
 ### Function order and data flow
 
@@ -279,10 +283,10 @@ flowchart TD
     B --> C["compare_policies(): next policy and seed"]
     C --> D["BanditEnvironment.for_contextual() → run_episode()"]
     D --> E["Reset; generator.generate_pool() creates candidates"]
-    E --> F["context_matrix(), costs and groups → select_action()"]
-    F --> G["env.step(): fund one borrower and queue outcome"]
-    G --> H["Release due FeedbackEvents → policy.update()"]
-    H --> I["Record metrics; next pool prepared inside step()"]
+    E --> F["Update on feedback due at round start"]
+    F --> G["Fund one affordable borrower or advance without funding"]
+    G --> H["Update immediately for zero-delay funding"]
+    H --> I["Record metrics and continue with the next pool"]
     I --> J{"Finished?"}
     J -->|No| F
     J -->|Yes| K["Return summary and trajectory"]
@@ -290,9 +294,9 @@ flowchart TD
     C -->|All episodes complete| L["save_results() → save_evaluation_report() → display_results()"]
 ```
 
-`run_contextual()` builds settings and the encoder. The environment converts its candidate list into feature rows, costs, and audit groups. The policy scores those rows and returns the chosen pool index. `step()` samples repayment, spends the requested amount, and stores the chosen features in a `FeedbackEvent`. The evaluator passes released feedback to `update()`, which adjusts the shared ridge model.
+`run_contextual()` builds settings and the encoder. The environment converts its candidate list into feature rows, costs, and audit groups. The policy scores those rows and returns the chosen pool index. `step()` uses the selected applicant's potential repayment, spends the requested amount, and stores the chosen features in a `FeedbackEvent`. The evaluator passes released feedback to `update()`, which adjusts the learner's ridge model.
 
-With `--feedback-delay 3`, a loan funded at round 0 becomes eligible for feedback release during the step at round 3. Selection in that round occurs before the step releases feedback. The exported reward is known to the evaluator from funding time, while the learner must wait. An episode can end with `pending_feedback`; it does not keep lending or advance extra rounds just to train on those outcomes. It stops at the horizon or when the current pool has no affordable applicant.
+With `--feedback-delay 3`, a loan funded at round 0 becomes observable before selection in round 3. With zero delay, feedback arrives immediately after funding. An unaffordable pool advances the clock without funding, and the episode counts arrivals and processes due feedback through the configured horizon.
 
 ### Algorithms in brief
 
@@ -361,7 +365,7 @@ flowchart TD
     C --> D{"Applicant chosen?"}
     D -->|Yes| E["policy.decision_context(): preserve features"]
     E --> F["env.fund(): remove applicant, spend cash, create PendingLoan"]
-    F --> G{"Batch limit reached?"}
+    F --> G{"Batch limit reached after any immediate feedback?"}
     G -->|No| C
     G -->|Yes| H["Record round metrics; policy.on_round_end()"]
     D -->|No| H
@@ -377,14 +381,14 @@ The loan's data takes this route:
 BorrowerCandidate → select_action() returns its current pool index
                   → decision_context() preserves the feature vector
                   → fund() creates PendingLoan with principal and due round
-                  → advance_round() releases the loan when due
+                  → the environment releases feedback when the loan matures
                   → MaturedLoanFeedback carries the original vector and outcome
                   → policy.update() teaches the learner from that loan
 ```
 
-`fund()` samples the outcome immediately for simulation, but the learner sees it only at maturity. Saved `hidden_reward` and `true_repayment_probability` fields are evaluator information. The chosen applicant is removed from the pool. The next selection uses updated cash, applicants, and fairness counts, so a batch is selected **one loan at a time**.
+`fund()` uses the potential repayment associated with the chosen applicant. The learner sees the outcome at maturity. Saved `hidden_reward` and `true_repayment_probability` fields are evaluator information. Funding removes the chosen applicant from the pool. The next selection uses updated cash, applicants, and fairness counts, so a batch is selected **one loan at a time**.
 
-At round end, Lagrangian policies update their fairness penalty weights. Advancing the round releases due loans into cash and prepares a fresh pool; unfunded applicants are not carried forward. The policies generally keep funding affordable applicants even if the best score is negative; there is no explicit score-based “hold cash” action. The environment can wait through empty lending rounds while repayments are pending. It stops at the horizon, or earlier when no loans are pending and spendable cash is below the minimum loan cost.
+At round end, Lagrangian policies update their fairness penalty weights. Advancing releases due loans into cash and prepares a fresh pool. With zero repayment delay, matured feedback and any capital return are available for the next slot in the same round. Empty lending rounds still count toward the horizon and may release repayments.
 
 ### Algorithms in brief
 
@@ -540,7 +544,7 @@ Phase 1 targets are A 20%, B 30%, C 30%. Phases 2–3 target `disabled` 4%, `res
 
 Each individual borrower is counted in one primary audit group, with priority `disabled → reserved → minority → women → aged → none`. A woman with a disability is counted under `disabled`; `funded_women` therefore does not count every female borrower. `aged` and `none` participate in group comparisons but have no default quota.
 
-With no loans, all allocation shares are zero for quota calculations and Phase 1 parity is unevaluable. Applicant parity excludes groups with zero opportunities and is undefined with fewer than two contributing groups. Each pool contributes once. Population counts include arrivals before affordability filtering within the observed episode. Phase 3 checks affordability after maturities and reserve checks, before selecting the batch.
+With no loans, all allocation shares are zero for quota calculations and Phase 1 parity is unevaluable. Applicant parity excludes groups with zero opportunities and is undefined with fewer than two contributing groups. Each pool contributes once. Population counts include every arrival through the configured horizon. Phase 3 counts feasible opportunities using cash after start-of-round maturities and the reserve, before selecting the batch.
 
 **Hard fairness** is a priority-based intervention. It looks for an eligible candidate in a group with a projected quota shortfall, then looks for one in the lowest-rate groups if parity exceeds tolerance. It delegates to the base policy on the full feasible set when neither restriction applies. Phase 1 preserves its affordable group-round intervention rate. Phases 2–3 use feasible-opportunity funding rates. **Soft fairness** adds a quota bonus to raw scores in Phases 1–2, so its effect depends on the base score scale. **Lagrangian fairness** in Phase 3 adapts penalty weights for projected violations. See the formulas in [Mathematical formulation](MATHEMATICAL_FORMULATION.md#fairness-metrics-and-phase-12-wrappers).
 
@@ -558,7 +562,7 @@ The Phase 1 hard wrapper uses parity tolerance **0.35**, Phase 2 uses **0.010**,
 | `ranked_results.csv` | Flattened aggregates, fairness checks, and rank; Modes 2–3. |
 | `funding_log.csv` | One issued loan, including its hidden evaluator outcome; Mode 3 and sweeps. |
 | `maturity_log.csv` | One matured loan and the cash it returned; Mode 3 and sweeps. |
-| `run_manifest.json` | Saved configuration, policies, and other run metadata. Phase manifests include software versions. Standalone Mode 1 does not write one. |
+| `run_manifest.json` | Run settings, episode seeds, policy parameters, random-stream convention, simulation version, software versions and Git provenance. Sweep case settings are in the linked `config.json` files. |
 | `report.html`, `winner_summary.txt` | Readable comparison; winner summary is written for Modes 2–3. Standalone Mode 1 uses the printed table, CSVs, and plots. |
 | `*.png` | Plots of metric means over rounds; sweep plots compare parameter values. Check the axis and metric name before comparing. |
 | Sweep `raw_results.csv` | One episode plus its sweep settings and diagnostic metrics; this is the sweep summary table. |
@@ -575,11 +579,13 @@ Main phase aggregate CSVs use multiple header rows to group `mean` and `std` und
 | --- | --- |
 | `policy`, `seed` | Strategy name and trial identifier. Use both when filtering an episode. |
 | `rounds` | Loans funded in Phases 1–2; elapsed rounds in Phase 3. |
+| `decision_rounds` | Elapsed rounds in Phases 1–2, including rounds skipped for affordability. |
 | `loans_funded` | Number issued in Phase 3, which can exceed the number of rounds. |
-| `cumulative_reward` | Total successful repayments. In Phase 3 it includes eventual outcomes of loans still pending at the horizon. Phase 2 also reports sampled outcomes even if feedback is delayed. |
+| `cumulative_reward` | Eventual successes among funded loans, including successes still pending at the horizon. |
+| `observed_cumulative_reward` / `observed_reward_by_horizon` | Successes revealed by the trajectory round or by the advance into the horizon, respectively. |
 | `cumulative_cost` / `cumulative_disbursed` | Sum of amounts lent; the latter is the Phase 3 name. Repeated lending of recycled cash contributes again. |
-| `repayment_rate` | Successful repayments ÷ loans funded; 0.75 means 75%, not 0.75%. |
-| `reward_per_cost` | Successful repayments ÷ total amount lent; multiply by 10,000 to express successes per 10,000 units. It is not a profit or repayment percentage. |
+| `repayment_rate` | Eventual successes divided by loans funded. |
+| `reward_per_cost` | Eventual successes divided by principal disbursed. |
 | `budget_utilization` | In Phases 1–2, spending ÷ starting budget. In sweep summaries, `(initial capital − final cash) / initial capital`; use turnover to measure repeated lending. |
 | `pending_feedback` | Phase 2 outcomes still unavailable to the learner; Phase 1 has immediate feedback. |
 | `funded_G`, `opportunities_G`, `population_opportunities_G` | Loans, affordable opportunities and all arriving opportunities for group G. Phase 1 uses affordable group-rounds and has no applicant population column. Missing counts are zero. |
@@ -593,7 +599,6 @@ Main phase aggregate CSVs use multiple header rows to group `mean` and `std` und
 
 | Column | Meaning |
 | --- | --- |
-| `observed_reward_by_horizon` | Repayments actually revealed by episode end. |
 | `observed_repayments`, `observed_defaults` | Trajectory counts of matured successes/defaults. |
 | `eventual_cumulative_reward` | Trajectory/sweep name for total sampled successful outcomes, including pending ones. |
 | `available_capital` / `final_available_capital` | Spendable cash before applying any reserve requirement. |
@@ -601,6 +606,7 @@ Main phase aggregate CSVs use multiple header rows to group `mean` and `std` und
 | `pending_loans` | Number of outstanding loans. |
 | `cumulative_recycled` | Cash returned through maturity events by the current time or horizon. |
 | `cumulative_default_loss` / `default_loss_by_horizon` | Principal lost on defaults already observed, net of configured recovery. |
+| `cumulative_unrecycled_successful_principal` / `unrecycled_successful_principal_by_horizon` | Principal from matured successful loans that did not return to available capital. |
 | `capital_turnover` | Total disbursed ÷ initial capital. Above 1 means cash has funded more than one cycle of loans. |
 | `capital_survival_ratio` | `(cash + outstanding principal) / initial capital`; values outstanding loans at face value. |
 | `eventual_terminal_capital` | Final cash plus eventual recoverable returns from pending loans, using simulator knowledge. |
@@ -612,7 +618,7 @@ Main phase aggregate CSVs use multiple header rows to group `mean` and `std` und
 
 For example, `B1-F0-R2-Q0` means cash is 20%–55% of initial capital, parity is within tolerance, recent repayment rate is at least 75%, and total quota deficit is at most 0.01. The other cash cutoffs are 20%/55%; parity bands use tolerance/twice tolerance; repayment cutoffs are 55%/75%; quota cutoffs are 0.01/0.10.
 
-Timing matters: the final Phase 3 trajectory row is recorded **before** the last `advance_round()`, while the episode summary includes maturities released by that advance. For hard-fair LinUCB seed 0, the final trajectory has 343 observed repayments and 24 pending loans; the summary has 346 and 21. This is why the last trajectory row need not match every summary field.
+The last trajectory row describes the final decision round. The episode summary also includes feedback due on the advance into the horizon. In Phase 3, the summary's cash and outstanding principal include capital movements from that advance.
 
 ### Ranking and sweep diagnostics
 
@@ -638,7 +644,7 @@ Compare policies within the same phase and configuration. Phase 1 uses a differe
 | `--pool-size` | 20 | Fresh applicants per round in Phases 2–3. |
 | `--feedback-delay` | 0 | Phase 2 delay before the learner receives outcomes; does not recycle money. |
 | `--batch-size` | 3 | Phase 3 maximum loans per round. |
-| `--repayment-delay` or `--delay` | 8 | Phase 3 rounds until maturity; at least 1. |
+| `--repayment-delay` or `--delay` | 8 | Phase 3 rounds until maturity. Zero matures the loan immediately. |
 | `--recycle-fraction` | 1.0 | Fraction of repaid principal returned to Phase 3 cash. |
 | `--default-recovery` | 0.0 | Fraction of defaulted principal recovered at maturity. |
 | `--liquidity-reserve` | 0 | Cash held back from new Phase 3 lending. |

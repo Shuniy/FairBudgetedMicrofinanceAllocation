@@ -6,6 +6,7 @@ from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from html import escape
 from math import ceil, floor, sqrt
+from os.path import relpath
 from pathlib import Path
 
 import matplotlib.pyplot as plt
@@ -19,6 +20,7 @@ from evaluate import (
     REPORT_STYLE,
     CMDPPolicyFactory,
     compare_cmdp_policies,
+    reproducibility_metadata,
 )
 from metrics import QUOTA_NUMERICAL_TOLERANCE, total_quota_deficit
 from models.environment_config import CMDPEnvironmentConfig
@@ -278,6 +280,8 @@ AGGREGATE_METRICS = (
     "loans_funded",
     "rounds_completed",
     "cumulative_recycled",
+    "default_loss_by_horizon",
+    "unrecycled_successful_principal_by_horizon",
     "recycled_capital",
     "final_available_capital",
     "final_remaining_capital",
@@ -801,6 +805,7 @@ def run_cmdp_sweep(
     trajectory_frames: list[pd.DataFrame] = []
     funding_frames: list[pd.DataFrame] = []
     maturity_frames: list[pd.DataFrame] = []
+    case_policy_configurations = []
 
     for case in cases:
         summaries, trajectories, funding, maturities = compare_cmdp_policies(
@@ -812,6 +817,7 @@ def run_cmdp_sweep(
             encoder=shared_encoder,
             quota_tolerance=quota_tolerance,
         )
+        case_policy_configurations.append(summaries.attrs["policy_configurations"])
         raw_frames.append(
             _add_sweep_metrics(
                 summaries,
@@ -868,7 +874,9 @@ def run_cmdp_sweep(
         "horizon": default_config.max_rounds,
         "quota_tolerance": quota_tolerance,
         "default_phase3_parameters": asdict(default_config),
+        "protected_attributes_in_prediction": shared_encoder.include_protected_attributes,
         "timestamp_utc": datetime.now(timezone.utc).isoformat(),
+        **reproducibility_metadata(),
         "cases": [
             {
                 "value": case.value,
@@ -879,8 +887,9 @@ def run_cmdp_sweep(
                 "parity_tolerance": case.parity_tolerance,
                 "parameter_details": dict(case.parameter_details),
                 "policies": list(case.policy_factories),
+                "policy_configurations": policy_configurations,
             }
-            for case in cases
+            for case, policy_configurations in zip(cases, case_policy_configurations)
         ],
         "feasibility_definition": (
             "opportunity_screens_passed combines separate quota and parity screens "
@@ -1069,6 +1078,10 @@ def save_mode4_report(
             name: sorted(artifact.raw_results["sweep_value"].unique().tolist())
             for name, artifact in artifacts.items()
         },
+        "sweep_configurations": {
+            name: relpath(artifact.output / "config.json", output)
+            for name, artifact in artifacts.items()
+        },
         "policies": sorted(
             {
                 policy
@@ -1078,6 +1091,7 @@ def save_mode4_report(
         ),
         "timestamp_utc": datetime.now(timezone.utc).isoformat(),
         "baseline_consistency": dict(baseline_consistency),
+        **reproducibility_metadata(),
     }
     (output / "run_manifest.json").write_text(
         json.dumps(manifest, indent=2, sort_keys=True, default=str) + "\n",

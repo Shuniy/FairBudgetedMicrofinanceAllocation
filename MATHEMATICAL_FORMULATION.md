@@ -4,27 +4,27 @@ This reference describes the three simulator modes and the policies registered i
 
 ## Shared notation, reward and feasibility
 
-At decision $t$, action $i$ has currently observed cost $c_{t,i}>0$, group $g_{t,i}$ and simulator repayment probability $p_{t,i}$. A funded loan draws $r_{t,i}\sim\operatorname{Bernoulli}(p_{t,i})$. Phase 1 uses an arm's fixed $p_i$ and a fresh cost each round, $c_{t,i}=\max(c_{\min},Z_{t,i})$, where $c_{\min}$ is the configured cost floor and $Z_{t,i}$ is drawn from the arm's configured normal distribution or set to its mean when the standard deviation is zero. Phases 2–3 use requested loan principal and the synthetic borrower's probability, a logistic function of borrower and loan attributes clipped to $[0.05,0.95]$ by `SyntheticBorrowerGenerator.true_repayment_probability` in [simulation.py](simulation.py). Only the informed policies use $p_{t,i}$ to select actions. Repayment counts and repayments per unit of principal measure simulated lending outcomes. The simulator supplies no monetary profit or causal poverty-alleviation measure.
+At decision $t$, action $i$ has currently observed cost $c_{t,i}>0$, group $g_{t,i}$ and simulator repayment probability $p_{t,i}$. Each arm or original applicant position has a potential outcome $r_{t,i}=\mathbf 1\{u_{t,i}<p_{t,i}\}$, where $u_{t,i}\sim\operatorname{Uniform}[0,1)$. Funding selects which outcomes can become feedback. Phase 1 uses an arm's fixed $p_i$ and a fresh cost each round, $c_{t,i}=\max(c_{\min},Z_{t,i})$, where $c_{\min}$ is the configured cost floor and $Z_{t,i}$ is drawn from the arm's configured normal distribution or set to its mean when the standard deviation is zero. Phases 2–3 use requested loan principal and the synthetic borrower's probability, a logistic function of borrower and loan attributes clipped to $[0.05,0.95]$. The episode seed gives NumPy separate streams for opportunities, potential outcomes and policy decisions. Policies using the same configuration and seed receive matching offers for each round reached. Only informed policies receive $p_{t,i}$ to select actions. [simulation.py](simulation.py)
 
-Let $T_{\max}$ be the configured horizon (`max_rounds`) and $T\le T_{\max}$ the realized number of rounds. In Phases 1–2, each round funds one action $a_t$. A Phase 1 action identifies a borrower-group arm, and a Phase 2 action identifies an individual borrower candidate in the current pool. Let $B_0$ be the initial budget and $B_t$ the remaining budget before round $t$. The feasible set $\mathcal F_t$ contains the affordable current offers for $t<T_{\max}$ and is empty at the horizon. The episode ends at the horizon or at the first offer set with no feasible action, so $T$ can depend on the policy and can be zero. Repayment leaves the remaining budget unchanged. See `BanditEnvironment.feasible_actions`, `step` and `_refresh_done_flag` in [base_environment.py](Environments/base_environment.py).
+Let $T_{\max}$ be the configured horizon and $T\le T_{\max}$ the number of elapsed decision rounds. Phases 1–2 fund at most one action per round. A Phase 1 action identifies an arm, and a Phase 2 action identifies an applicant in the current pool. An empty feasible set advances the clock with no loan. Phase 1 can stop when the budget falls below the minimum possible cost across arms. Phase 2 records every pool through the configured horizon for population fairness. Repayment leaves the non-recycling budget unchanged. [base_environment.py](Environments/base_environment.py)
 
-Phase 1 learns immediately. With Phase 2 feedback delay $d_{\mathrm{fb}}$, funding at round $s$ releases feedback during the step at $s+d_{\mathrm{fb}}$ if that step occurs, after its decision. The next decision can use it if the episode continues. The runner records outcomes at funding for evaluation and delivers only released events to learners. See `run_episode` in [evaluate.py](evaluate.py).
+Phase 1 learns immediately. Phase 2 feedback from funding at round $s$ is released at $s+d_{\mathrm{fb}}$, before decisions in that round for positive delays and immediately after funding for zero delay. Skipped rounds release due feedback. The episode summary includes feedback due at the advance into $T$, with no decision at that boundary. [evaluate.py](evaluate.py)
 
 `BasePolicy.select_action` in [bandit.py](Algorithms/bandit.py) and `CMDPPolicy.select_action` in [cmdp.py](Algorithms/cmdp.py) intersect any supplied candidate subset with feasible indices and sample uniformly among sorted options whose scores equal the maximum within NumPy's `isclose` tolerance. Same-sign infinities tie. Phase 1–2 raise when the set is empty. Phase 3 returns `None`. KUBE and hard-fairness wrappers have the additional selection stages below.
 
 ### Finite-horizon optimisation in Phases 1–2
 
-For each non-recycling phase, let $\pi$ be a policy that selects $a_t$ using the information available at decision $t$. The expectation averages over simulator and policy randomness. The research problem is
+For each non-recycling phase, let $\pi$ select $a_t$ using the information available at decision $t$. Let $D\subseteq\{0,\ldots,T-1\}$ contain the rounds with a funded action. The expectation averages over simulator and policy randomness. The research problem is
 
 $$
 \begin{aligned}
-\max_{\pi}\quad &\mathbb E_\pi\!\left[\sum_{t=0}^{T-1}r_{t,a_t}\right] \\
-\text{subject to}\quad &a_t\in\mathcal F_t\qquad (0\le t<T),\\
-&\sum_{t=0}^{T-1}c_{t,a_t}\le B_0\qquad\text{almost surely}.
+\max_{\pi}\quad &\mathbb E_\pi\!\left[\sum_{t\in D}r_{t,a_t}\right] \\
+\text{subject to}\quad &a_t\in\mathcal F_t\qquad (t\in D),\\
+&\sum_{t\in D}c_{t,a_t}\le B_0\qquad\text{almost surely}.
 \end{aligned}
 $$
 
-Action feasibility enforces the pathwise budget constraint through $\mathcal F_t=\{i:c_{t,i}\le B_t\}$ in the exact formulation. The simulator checks $c_{t,i}\le B_t+10^{-12}$ and updates $B_{t+1}=\max(0,B_t-c_{t,a_t})$. Recorded principal can therefore differ from the change in remaining budget near exhaustion.
+With remaining budget $B_t$ before round $t$, the simulator accepts only $0<c_{t,i}\le B_t$. Funding subtracts exactly one principal amount and skipped rounds leave the budget unchanged. Thus $B_T=B_0-\sum_{t\in D}c_{t,a_t}\ge0$ up to floating-point roundoff.
 
 The terminal fairness metrics are total quota deficit $Q_T$ and the phase-specific gap $G_T$ defined [below](#fairness-metrics-and-phase-12-wrappers). Expected-value targets $\mathbb E_\pi[Q_T]\le\tau_q$ and $\mathbb E_\pi[G_T]\le\tau_p$ allow individual episodes to exceed either threshold. Evaluation reports the empirical means and the fraction of individual episodes meeting the thresholds. The policies implement heuristics without a guarantee of terminal or anytime fairness.
 
@@ -33,14 +33,14 @@ The terminal fairness metrics are total quota deficit $Q_T$ and the phase-specif
 In Phases 1–2, cumulative reward is the number of successful repayments and cumulative cost is the total principal disbursed. For an episode,
 
 $$
-R_T=\sum_{t=0}^{T-1}r_{t,a_t},\qquad
-C_T=\sum_{t=0}^{T-1}c_{t,a_t},\qquad
+R_T=\sum_{t\in D}r_{t,a_t},\qquad
+C_T=\sum_{t\in D}c_{t,a_t},\qquad
 RPC_T=\frac{R_T}{C_T},\qquad
 RR_T=\frac{R_T}{N_{\mathrm{funded}}},\qquad
 BU_T=\frac{B_0-B_T}{B_0}.
 $$
 
-Here $N_{\mathrm{funded}}=T$ in Phases 1–2 and $B_T$ is the terminal remaining budget. Repayment rate $RR_T$ is the fraction of funded loans that repay. Reward per unit cost $RPC_T$ counts successful repayments per unit of principal. Monetary profit would require cash flows such as interest and lending expenses. Reported rewards use all sampled outcomes at funding, including outcomes still awaiting learner feedback in Phase 2.
+Here $N_{\mathrm{funded}}=|D|$ in Phases 1–2 and $B_T$ is the terminal remaining budget. Repayment rate $RR_T$ uses eventual successes divided by loans funded. Reward per unit cost $RPC_T$ uses eventual successes divided by principal disbursed. The `observed_reward_by_horizon` field counts only repayments revealed by the advance into the horizon.
 
 Empty sums are zero. The summary uses zero for $RPC_T$ when $C_T\le0$ and for $RR_T$ when no loans were funded. Budget utilisation $BU_T$ measures the fraction of the one-use budget spent. The environment requires $B_0>0$, and the `budget_utilization` helper divides by $B_0$ directly with no zero guard. See `reward_per_unit_cost`, `repayment_rate` and `budget_utilization` in [metrics.py](metrics.py), and `run_episode` in [evaluate.py](evaluate.py).
 
@@ -131,7 +131,7 @@ Here $[z]_+=\max(0,z)$. With zero loans, each positive target contributes its fu
 
 **Phase 1 allocation-share parity.** The gap is $\max_g a_g-\min_g a_g$ across all configured arm groups, including groups funded zero times. With zero loans, the gap is zero by convention and parity is unevaluable. Applicant-level parity comparisons use a different denominator and a different population.
 
-**Phases 2–3 applicant parity.** For $d\in\{\mathrm{population},\mathrm{feasible}\}$, set $G_d=\{g:O_{d,g}>0\}$ and $f_{d,g}=F_g/O_{d,g}$ for $g\in G_d$. The gap is $\max_{g\in G_d} f_{d,g}-\min_{g\in G_d} f_{d,g}$ when $|G_d|\ge2$ and undefined otherwise. Groups without opportunities have blank funding rates. Population opportunities include every eligible arrival before filtering. Feasible opportunities include applicants affordable at arrival, after maturities and reserve checks in Phase 3 and before any lending in the batch. The pool is counted once even if scored repeatedly. This ensures $0\le F_g\le O_{\mathrm{feasible},g}\le O_{\mathrm{population},g}$. Feasible opportunities depend on prior allocations. Population opportunities cover only pools generated in the observed episode, including a generated pool that triggers termination before a decision. Trajectory rows cover decision rounds and omit such a terminal pool. Episode summaries include it.
+**Phases 2–3 applicant parity.** For $d\in\{\mathrm{population},\mathrm{feasible}\}$, set $G_d=\{g:O_{d,g}>0\}$ and $f_{d,g}=F_g/O_{d,g}$ for $g\in G_d$. The gap is $\max_{g\in G_d} f_{d,g}-\min_{g\in G_d} f_{d,g}$ when $|G_d|\ge2$ and undefined otherwise. Groups without opportunities have blank funding rates. Population opportunities include every arrival over the configured horizon, including rounds after lending funds are exhausted. Feasible opportunities include applicants affordable at arrival, after maturities and reserve checks in Phase 3 and before any lending in the batch. Each pool is counted once. This ensures $0\le F_g\le O_{\mathrm{feasible},g}\le O_{\mathrm{population},g}$. Feasible opportunities depend on prior allocations.
 
 Both opportunity and loan counts use `BorrowerCandidate.fairness_group`, which delegates to `Borrower.primary_fairness_group`. The priority `disabled → reserved → minority → women → aged → none` partitions applicants into mutually exclusive, first-match categories. A woman with a disability contributes only to `disabled`. The categories represent that partition of the arriving applicants.
 
@@ -151,23 +151,23 @@ The legacy `demographic_parity_gap` field mirrors `allocation_share_gap` in Phas
 
 ### Full state and observable quantities
 
-Before the round's funding decisions, a sufficient environment state includes round index, available capital, the current applicant pool (including latent repayment parameters), outstanding records (principal, funded and due rounds, latent outcomes and saved learning contexts), funding and opportunity counts, and repayment and cumulative accounting history needed for tracking and reporting. Within a batch it also includes the runner's number of slots already used. The seeded implementation shares a random generator across borrower generation and outcomes. To reproduce its transitions exactly, include that generator's state and the sequential applicant counter. Policy-specific ridge and multiplier states come from the observations processed by the policy.
+Before the round's funding decisions, a sufficient environment state includes round index, available capital, the current applicant pool and its potential outcomes, outstanding records, funding and opportunity counts, and repayment and cumulative accounting history. Within a batch it also includes the runner's number of slots already used. The states of the opportunity and outcome streams, together with the sequential applicant counter, reproduce future arrivals and potential outcomes. Policy-specific ridge and multiplier states come from the observations processed by the policy.
 
 The policy-facing information includes contexts, requested principals, primary groups, feasibility and group counts, current cash and time, capital at risk, pending loan counts or scheduled principal, and observed repayment and loss summaries. The compact portfolio quantities and the discretized buckets in `state_bucket` do not on their own determine transitions, including which principal and outcomes mature when. Policies score the current information available to them. Loan outcomes stay hidden from learners until maturity. See `observation`, `fund`, `advance_round` and `state_bucket` in [cmdp_environment.py](Environments/cmdp_environment.py).
 
 ### Batches, timing and capital
 
-Let $B_t$ be cash at the start of lending in round $t$ **after** releases due then, $\ell$ the configured reserve, $c_{\mathrm{floor}}$ the spendable-cash floor, and $K$ the batch limit. For each slot the runner intersects the remaining pool with $c_{t,i}\le B_{\mathrm{now}}-\ell+10^{-12}$, using the cash available at that slot. The feasible set is empty if $B_{\mathrm{now}}-\ell<c_{\mathrm{floor}}-10^{-12}$. `fund` removes the chosen applicant, subtracts principal from cash, increments its group count and records a pending loan due at $t+d_{\mathrm{rep}}$ for configured delay $d_{\mathrm{rep}}\ge1$. Its stored learning vector is a copy of the one supplied at funding. Recompute feasibility and scores for the next slot, stopping when $K$ loans have been funded or the selector returns `None`. Duplicate funding within the batch is prevented by removal. The runner enforces $K$. The environment enforces single-loan feasibility. A batch may be empty, with no explicit policy action to reject an affordable candidate based on its score.
+Let $B_t$ be cash at the start of lending in round $t$ after feedback due then, $\ell$ the reserve and $K$ the batch limit. Each slot requires $0<c_{t,i}\le B_{\mathrm{now}}-\ell$ using cash available at that slot. Funding removes the chosen applicant, subtracts principal and records a loan due at $t+d_{\mathrm{rep}}$. With zero delay, feedback and returned cash are available before the next slot. With positive delay, both arrive before lending in the maturity round. The runner recomputes feasibility and scores for each slot and funds at most $K$ loans.
 
 The resulting batch $\mathcal A_t$ has total principal $C_t^{\mathrm{batch}}=\sum_{i\in\mathcal A_t}c_{t,i}$. Let $\mathcal M_{t+1}$ be the outstanding loans due by the next round advance. For loan $j$ with principal $c_j$ and repayment $r_j$, denote the recycle and default recovery fractions by $\rho_{\mathrm{rep}}$ and $\rho_{\mathrm{def}}$. The advance increments the round, releases due loans, and then generates the next pool below the horizon:
 
 $$
 \mathcal R_{t+1}=\sum_{j\in\mathcal M_{t+1}}
 c_j\bigl(\rho_{\mathrm{rep}}r_j+\rho_{\mathrm{def}}(1-r_j)\bigr),\qquad
-B_{t+1}=B_t-C_t^{\mathrm{batch}}+\mathcal R_{t+1},\qquad B_0=B_{\mathrm{init}}.
+B_{t+1}=B_t-C_t^{\mathrm{batch}}+\mathcal R_{t+1}+\mathcal R_{t}^{\mathrm{immediate}},\qquad B_0=B_{\mathrm{init}}.
 $$
 
-Matured loans leave capital at risk, which is the sum of outstanding principal. Each matured default adds $c_j(1-\rho_{\mathrm{def}})$ to cumulative default loss. The unrecycled portion of repaid principal reduces surviving capital without entering the default-loss counter. The runner logs post-funding round values before the advance, updates the fairness multipliers, and delivers matured feedback before the next lending decision if one exists. The run ends at the configured horizon or upon an advance with no pending loans and spendable cash below $c_{\mathrm{floor}}$ (also checked at reset). Terminal advance still releases maturities even when there is no ensuing learner update.
+The immediate-return term is the sum of returned cash from zero-delay loans funded in the current round. Maturity removes principal from the outstanding balance and credits any return once. A matured default adds $c_j(1-\rho_{\mathrm{def}})$ to net default loss. A matured repayment adds $c_j(1-\rho_{\mathrm{rep}})$ to unrecycled successful principal. At any time, initial capital equals cash plus outstanding principal plus these two cumulative losses. Cash also equals initial capital minus cumulative disbursements plus cumulative returns, including recoveries. The runner logs post-funding balances before the advance and counts empty batches through the horizon. The final advance releases maturities due at the horizon.
 
 ### Objective and constraints
 

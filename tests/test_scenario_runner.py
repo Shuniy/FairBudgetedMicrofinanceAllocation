@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import random
 import subprocess
 import sys
@@ -49,12 +50,26 @@ def test_scenario_runs_all_phases_with_configured_seeds(tmp_path, monkeypatch):
 
     destination = tmp_path / "scenario_1"
     expected_seeds = {config["seed_start"], config["seed_start"] + 1}
+    manifests = {}
     for phase, policy_count in (("arm", 13), ("contextual", 14), ("cmdp", 12)):
         raw = pd.read_csv(destination / phase / "episode_summaries.csv")
         assert set(raw.seed) == expected_seeds
         assert len(raw) == policy_count * config["seeds"]
         assert not raw.duplicated(["policy", "seed"]).any()
         assert (destination / phase / "aggregate_results.csv").is_file()
+        manifest = json.loads((destination / phase / "run_manifest.json").read_text())
+        assert set(manifest["seeds"]) == expected_seeds
+        assert set(manifest["policy_configurations"]) == set(raw.policy)
+        manifests[phase] = manifest
+    assert manifests["cmdp"]["configuration"]["max_loans_per_round"] == config["batch_size"]
+    contextual = manifests["contextual"]
+    assert contextual["configuration"]["marginalized_probability"] == 0.20
+    assert contextual["policy_configurations"]["linucb"]["parameters"] == {
+        "alpha": 0.70,
+        "budget_aware": False,
+        "n_features": 25,
+        "regularization": 1.0,
+    }
     for sweep, rows_per_seed in (("budget", 60), ("group_imbalance", 60),
                                  ("fairness_strength", 36)):
         folder = destination / "cmdp_robustness" / "sweeps" / sweep

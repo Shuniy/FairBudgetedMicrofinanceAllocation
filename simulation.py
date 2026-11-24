@@ -12,6 +12,17 @@ from models.borrower_candidate import BorrowerCandidate
 from models.environment_config import ContextualEnvironmentConfig
 
 
+def environment_rngs(seed: int) -> tuple[np.random.Generator, np.random.Generator]:
+    """Create the opportunity and potential-outcome streams for an episode."""
+    opportunity_seed, outcome_seed = np.random.SeedSequence(seed).spawn(2)
+    return np.random.default_rng(opportunity_seed), np.random.default_rng(outcome_seed)
+
+
+def policy_rng(seed: int) -> np.random.Generator:
+    """Use the third child of the experiment seed for policy randomness."""
+    return np.random.default_rng(np.random.SeedSequence(seed, spawn_key=(2,)))
+
+
 @dataclass(slots=True)
 class SyntheticBorrowerGenerator:
     """Generates synthetic borrower candidates for simulation."""

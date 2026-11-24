@@ -301,6 +301,10 @@ def test_reports_include_grid_manifest_html_and_combined_links(tmp_path) -> None
     )
     assert manifest["seeds"] == [0, 1]
     assert manifest["policy_parameters"]["epsilon"] == 0.1
+    assert manifest["simulation_version"] == 2
+    assert "SeedSequence" in manifest["rng_convention"]["seed_derivation"]
+    assert {"python", "numpy", "pandas", "matplotlib"} <= manifest["package_versions"].keys()
+    assert {"git_commit", "git_dirty"} <= manifest.keys()
     assert "winner" in (contextual_output / "report.html").read_text(
         encoding="utf-8"
     )

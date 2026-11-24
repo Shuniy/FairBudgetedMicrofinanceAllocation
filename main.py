@@ -50,6 +50,7 @@ from evaluate import (
     display_results,
     flatten_aggregate,
     rank_results,
+    reproducibility_metadata,
     save_combined_report,
     save_cmdp_results,
     save_evaluation_report,
@@ -459,8 +460,8 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         parser.error("--feedback-delay cannot be negative")
     if args.batch_size <= 0:
         parser.error("--batch-size must be positive")
-    if args.repayment_delay < 1:
-        parser.error("--repayment-delay must be at least one")
+    if args.repayment_delay < 0:
+        parser.error("--repayment-delay cannot be negative")
     if not 0.0 <= args.recycle_fraction <= 1.0:
         parser.error("--recycle-fraction must be in [0, 1]")
     if not 0.0 <= args.default_recovery <= 1.0:
@@ -488,25 +489,44 @@ def run_arm(
     except ValueError as exc:
         raise SystemExit(f"Invalid arm configuration: {exc}") from exc
     budget = args.budget if args.budget is not None else 600.0
+    config = EnvironmentConfig(total_budget=budget, max_rounds=args.rounds)
+    seeds = list(range(args.seed_start, args.seed_start + args.seeds))
+    policies = build_arm_policy_factories(targets)
 
     def environment_factory(seed: int) -> BanditEnvironment:
         return BanditEnvironment.for_arms(
             arms=arms,
-            config=EnvironmentConfig(
-                total_budget=budget,
-                max_rounds=args.rounds,
-                seed=seed,
-            ),
+            config=replace(config, seed=seed),
         )
 
     summaries, trajectories = compare_policies(
         environment_factory,
-        build_arm_policy_factories(targets),
+        policies,
         targets,
-        list(range(args.seed_start, args.seed_start + args.seeds)),
+        seeds,
     )
     destination = output or args.output or Path("outputs") / "arm"
     aggregate = save_results(summaries, trajectories, destination, "arm")
+    manifest = {
+        "mode": "arm",
+        "seeds": seeds,
+        "policies": list(policies),
+        "configuration": {
+            **asdict(config),
+            "arms": [asdict(arm) for arm in arms],
+            "target_shares": targets,
+        },
+        "fairness_thresholds": {
+            "parity_tolerance": ARM_PARITY_TOLERANCE,
+            "quota_tolerance": QUOTA_TOLERANCE,
+        },
+        "policy_configurations": summaries.attrs["policy_configurations"],
+        **reproducibility_metadata(),
+    }
+    (destination / "run_manifest.json").write_text(
+        json.dumps(manifest, indent=2, sort_keys=True, default=str) + "\n",
+        encoding="utf-8",
+    )
     display_results(aggregate, destination, "arm")
     return aggregate
 
@@ -519,17 +539,17 @@ def run_contextual(
     budget = args.budget if args.budget is not None else 600_000.0
     encoder = BorrowerFeatureEncoder(include_protected_attributes=False)
     targets = DEFAULT_TARGET_SHARES
+    config = ContextualEnvironmentConfig(
+        total_budget=budget,
+        max_rounds=args.rounds,
+        pool_size=args.pool_size,
+        feedback_delay_rounds=args.feedback_delay,
+        minimum_cost=1.0,
+    )
 
     def environment_factory(seed: int) -> BanditEnvironment:
         return BanditEnvironment.for_contextual(
-            config=ContextualEnvironmentConfig(
-                total_budget=budget,
-                max_rounds=args.rounds,
-                seed=seed,
-                pool_size=args.pool_size,
-                feedback_delay_rounds=args.feedback_delay,
-                minimum_cost=1.0,
-            ),
+            config=replace(config, seed=seed),
             encoder=encoder,
         )
 
@@ -555,11 +575,7 @@ def run_contextual(
         quota_tolerance=QUOTA_TOLERANCE,
         seeds=seeds,
         configuration={
-            "total_budget": budget,
-            "max_rounds": args.rounds,
-            "pool_size": args.pool_size,
-            "feedback_delay_rounds": args.feedback_delay,
-            "minimum_cost": 1.0,
+            **asdict(config),
             "target_shares": targets,
             "protected_attributes_in_prediction": False,
         },
@@ -570,6 +586,7 @@ def run_contextual(
             "hard_parity_tolerance": CONTEXTUAL_PARITY_TOLERANCE,
             "soft_penalty_lambda": 0.015,
         },
+        policy_configurations=summaries.attrs["policy_configurations"],
     )
     display_results(aggregate, destination, "contextual", ranked)
     return aggregate
@@ -639,6 +656,7 @@ def run_cmdp(
                 "warmup_rounds": 5,
             },
         },
+        policy_configurations=summaries.attrs["policy_configurations"],
     )
     display_results(aggregate, destination, "cmdp", ranked)
     return aggregate
@@ -727,6 +745,8 @@ def run_all(args: argparse.Namespace):
         },
         "quick_test": bool(args.quick_test),
         "arguments": vars(suite_args),
+        "seeds": list(range(suite_args.seed_start, suite_args.seed_start + suite_args.seeds)),
+        **reproducibility_metadata(),
         "outputs": {
             "mode_1": "arm",
             "mode_2": "contextual",

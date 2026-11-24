@@ -76,6 +76,7 @@ class FundingResult:
     due_round: int
     available_capital: float
     capital_at_risk: float
+    observed_feedback: tuple[MaturedLoanFeedback, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)

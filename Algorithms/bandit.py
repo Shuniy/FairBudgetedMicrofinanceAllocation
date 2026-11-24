@@ -7,6 +7,7 @@ import numpy as np
 
 from Environments.base_environment import BanditEnvironment
 from models.events import FeedbackEvent
+from simulation import policy_rng
 
 
 class BasePolicy(ABC):
@@ -17,7 +18,7 @@ class BasePolicy(ABC):
         self.reset()
 
     def reset(self) -> None:
-        self.rng = np.random.default_rng(self.seed)
+        self.rng = policy_rng(self.seed)
         self.total_updates = 0
 
     @abstractmethod

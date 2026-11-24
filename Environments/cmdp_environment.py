@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from collections import defaultdict, deque
 from collections.abc import Mapping
+from functools import partial
+from types import SimpleNamespace
 from typing import Any
 
 import numpy as np
@@ -20,7 +22,7 @@ from models.events import (
     PendingLoan,
     RoundAdvanceResult,
 )
-from simulation import SyntheticBorrowerGenerator
+from simulation import SyntheticBorrowerGenerator, environment_rngs
 
 
 class StatefulMicrofinanceCMDPEnv:
@@ -78,7 +80,7 @@ class StatefulMicrofinanceCMDPEnv:
 
     def reset(self, seed: int | None = None) -> dict[str, Any]:
         actual_seed = self.config.seed if seed is None else seed
-        self.rng = np.random.default_rng(actual_seed)
+        self.rng, self._outcome_rng = environment_rngs(actual_seed)
         self.generator = SyntheticBorrowerGenerator(
             config=self.config.borrower_generation_config(actual_seed),
             encoder=self.encoder,
@@ -98,12 +100,21 @@ class StatefulMicrofinanceCMDPEnv:
         self.cumulative_disbursed = 0.0
         self.cumulative_recycled = 0.0
         self.cumulative_default_loss = 0.0
-        self.current_pool = self.generator.generate_pool(self.config.pool_size)
-        self._record_pool_opportunities()
+        self.cumulative_unrecycled_successful_principal = 0.0
+        self._prepare_round()
         self._matured_at_round_start: tuple[MaturedLoanFeedback, ...] = tuple()
         self._done = False
-        self._refresh_done_flag()
         return self.observation()
+
+    def _prepare_round(self) -> None:
+        self.current_pool = self.generator.generate_pool(self.config.pool_size)
+        self._outcome_draws = {
+            candidate.borrower.id: draw
+            for candidate, draw in zip(
+                self.current_pool, self._outcome_rng.random(len(self.current_pool))
+            )
+        }
+        self._record_pool_opportunities()
 
     def _record_pool_opportunities(self) -> None:
         """Count each arrival once and measure affordability before the batch."""
@@ -141,12 +152,10 @@ class StatefulMicrofinanceCMDPEnv:
 
     def feasible_actions(self) -> list[int]:
         spendable = self.available_capital - self.config.minimum_liquidity_reserve
-        if spendable < self.config.minimum_cost - 1e-12:
-            return []
         return [
             index
             for index, candidate in enumerate(self.current_pool)
-            if candidate.cost <= spendable + 1e-12
+            if 0 < candidate.cost <= spendable
         ]
 
     def due_soon_capital(self, lookahead_rounds: int = 2) -> float:
@@ -255,6 +264,49 @@ class StatefulMicrofinanceCMDPEnv:
             ),
         }
 
+    def policy_observation(self, *, informed: bool = False) -> SimpleNamespace:
+        """Snapshot the current candidates and observable portfolio state."""
+        observed = self.observation()
+        feasible = observed.pop("feasible_actions")
+        current_pool = tuple(
+            SimpleNamespace(context=context, cost=cost, fairness_group=group)
+            for context, cost, group in zip(
+                observed["contexts"], observed["costs"], observed["groups"]
+            )
+        )
+        fairness_state = SimpleNamespace(
+            current_pool=current_pool,
+            group_funding_counts=observed["group_funding_counts"],
+            group_opportunity_counts=observed["group_opportunity_counts"],
+        )
+        repayment_schedule = SimpleNamespace(
+            round_index=self.round_index,
+            pending_loans=tuple(
+                SimpleNamespace(due_round=loan.due_round, principal=loan.principal)
+                for loan in self.pending_loans
+            ),
+        )
+        view = SimpleNamespace(
+            **observed,
+            config=self.config,
+            total_allocations=self.total_allocations,
+            current_pool=current_pool,
+            base_context_matrix=lambda: observed["contexts"],
+            current_costs=lambda: observed["costs"],
+            current_groups=lambda: observed["groups"],
+            feasible_actions=lambda: feasible,
+            due_soon_capital=partial(
+                StatefulMicrofinanceCMDPEnv.due_soon_capital, repayment_schedule
+            ),
+            projected_fairness=partial(
+                StatefulMicrofinanceCMDPEnv.projected_fairness, fairness_state
+            ),
+        )
+        if informed:
+            probabilities = self.true_probabilities()
+            view.true_probabilities = lambda: probabilities
+        return view
+
     def fund(self, action: int, learning_context: np.ndarray) -> FundingResult:
         if self.done:
             raise RuntimeError("Cannot fund in a completed environment")
@@ -263,16 +315,14 @@ class StatefulMicrofinanceCMDPEnv:
         if action not in self.feasible_actions():
             raise ValueError("Selected borrower is not currently affordable")
 
-        candidate = self.current_pool.pop(action)
+        candidate = self.current_pool[action]
         principal = float(candidate.cost)
         reward = float(
-            self.rng.binomial(1, candidate.true_repayment_probability)
+            self._outcome_draws[candidate.borrower.id]
+            < candidate.true_repayment_probability
         )
         due_round = self.round_index + self.config.repayment_delay_rounds
 
-        self.available_capital -= principal
-        self.cumulative_disbursed += principal
-        self.group_funding_counts[candidate.fairness_group] += 1
         loan = PendingLoan(
             applicant_id=candidate.borrower.id,
             fairness_group=candidate.fairness_group,
@@ -283,6 +333,10 @@ class StatefulMicrofinanceCMDPEnv:
             true_repayment_probability=candidate.true_repayment_probability,
             learning_context=np.asarray(learning_context, dtype=float).copy(),
         )
+        self.current_pool.pop(action)
+        self.available_capital -= principal
+        self.cumulative_disbursed += principal
+        self.group_funding_counts[candidate.fairness_group] += 1
         self.pending_loans.append(loan)
         self.funding_history.append(
             {
@@ -298,6 +352,7 @@ class StatefulMicrofinanceCMDPEnv:
                 "vulnerability_score": candidate.borrower.vulnerability_score,
             }
         )
+        observed = self._release_due_loans() if due_round == self.round_index else ()
         return FundingResult(
             round_index=self.round_index,
             applicant_id=candidate.borrower.id,
@@ -308,6 +363,7 @@ class StatefulMicrofinanceCMDPEnv:
             due_round=due_round,
             available_capital=self.available_capital,
             capital_at_risk=self.capital_at_risk,
+            observed_feedback=observed,
         )
 
     def _release_due_loans(self) -> tuple[MaturedLoanFeedback, ...]:
@@ -328,6 +384,9 @@ class StatefulMicrofinanceCMDPEnv:
             if loan.repaid:
                 returned = loan.principal * self.config.recycle_fraction
                 self.observed_repayments += 1
+                self.cumulative_unrecycled_successful_principal += (
+                    loan.principal - returned
+                )
             else:
                 returned = (
                     loan.principal * self.config.default_recovery_fraction
@@ -376,12 +435,11 @@ class StatefulMicrofinanceCMDPEnv:
         self.round_index += 1
         matured = self._release_due_loans()
         if self.round_index < self.config.max_rounds:
-            self.current_pool = self.generator.generate_pool(self.config.pool_size)
-            self._record_pool_opportunities()
+            self._prepare_round()
         else:
             self.current_pool = []
         self._matured_at_round_start = matured
-        self._refresh_done_flag()
+        self._done = self.round_index >= self.config.max_rounds
         return RoundAdvanceResult(
             new_round_index=self.round_index,
             matured_feedback=matured,
@@ -411,15 +469,6 @@ class StatefulMicrofinanceCMDPEnv:
         return float(
             sum(row["hidden_reward"] for row in self.funding_history)
         )
-
-    def _refresh_done_flag(self) -> None:
-        horizon_done = self.round_index >= self.config.max_rounds
-        permanently_illiquid = (
-            not self.pending_loans
-            and self.available_capital - self.config.minimum_liquidity_reserve
-            < self.config.minimum_cost
-        )
-        self._done = horizon_done or permanently_illiquid
 
 
 # Short compatibility alias for callers that prefer environment-style naming.
