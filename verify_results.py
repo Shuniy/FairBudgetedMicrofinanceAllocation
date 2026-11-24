@@ -589,6 +589,9 @@ def verify_experiment(audit, directory, location):
     sweep = (directory / "config.json").is_file()
     manifest = json_file(directory / ("config.json" if sweep else "run_manifest.json"))
     mode = "cmdp" if sweep else manifest["mode"]
+    if mode != "arm":
+        audit.unverified.add("Complete contextual streams and policy decisions (feature vectors are not logged)")
+    audit.unverified.add("Counterfactual repayments for unfunded opportunities (not logged)")
     audit.require(
         isinstance(manifest.get("git_commit"), str) and isinstance(manifest.get("git_dirty"), bool)
         and {"python", "numpy", "pandas", "matplotlib", "scipy"} <= manifest.get("package_versions", {}).keys(),
@@ -658,9 +661,12 @@ def verify_experiment(audit, directory, location):
                     continue
                 episode_location = f"{case_location} policy={policy} seed={seed}"
                 try:
+                    trajectory = trajectories.get(key, empty)
+                    loans = funding.get(key, empty)
                     replay_episode(audit, episode_location, mode, config, thresholds, summaries.loc[key].copy(),
-                                   trajectories.get(key, empty).copy(), funding.get(key, empty),
-                                   maturity.get(key, empty), policy_settings)
+                                   trajectory.copy(), loans, maturity.get(key, empty), policy_settings)
+                    check_common_random_numbers(audit, episode_location, mode, seed, trajectory, loans,
+                                                opening_pools, potential_outcomes)
                     audit.episodes += 1
                 except (KeyError, ValueError, TypeError, AttributeError, OverflowError) as error:
                     audit.require(False, episode_location, "invalid_raw_record", str(error))
@@ -801,7 +807,7 @@ def check_sweep_baselines(audit, directory, location):
             )
             audit.require(matched, case_label, "baseline_configuration_and_episode_keys")
             if matched:
-                fields = set(subset) & set(candidate)
+                fields = (set(subset) & set(candidate)) - {*CASE_KEY, "sweep_name"}
                 for field in sorted(fields):
                     left, right = candidate[field].to_numpy(), subset[field].to_numpy()
                     if field.startswith(FAIRNESS_COUNT_PREFIXES):
@@ -812,13 +818,32 @@ def check_sweep_baselines(audit, directory, location):
 
 def check_suite(audit, root, manifest):
     phases = ("arm", "contextual", "cmdp", "cmdp_robustness")
+    scenario_parameters = {
+        "arm": {"total_budget": "arm_budget", "max_rounds": "rounds"},
+        "contextual": {
+            "total_budget": "budget",
+            "max_rounds": "rounds",
+            "pool_size": "pool_size",
+            "feedback_delay_rounds": "feedback_delay",
+        },
+        "cmdp": {
+            "initial_capital": "budget",
+            "max_rounds": "rounds",
+            "pool_size": "pool_size",
+            "max_loans_per_round": "batch_size",
+            "repayment_delay_rounds": "repayment_delay",
+            "recycle_fraction": "recycle_fraction",
+            "default_recovery_fraction": "default_recovery",
+            "minimum_liquidity_reserve": "liquidity_reserve",
+        },
+    }
     configurations = manifest["scenarios"]
-    expected_children = [root / phase for phase in phases] + [
-        root / "all_scenarios" / scenario / phase
-        for scenario in configurations for phase in phases
+    expected_children = [(root / phase, None) for phase in phases] + [
+        (root / "all_scenarios" / scenario / phase, config)
+        for scenario, config in configurations.items() for phase in phases
     ]
     expected = actual = 0
-    for directory in expected_children:
+    for directory, config in expected_children:
         location = str(directory.relative_to(root))
         path = directory / "run_manifest.json"
         if not path.is_file():
@@ -828,6 +853,31 @@ def check_suite(audit, root, manifest):
         audit.compare(location, "manifest.status", child["status"], "complete")
         expected += child["expected_episodes"]
         actual += child["actual_episodes"]
+        if config is None:
+            continue
+        seed_start = config["seed_start"]
+        seeds = list(range(seed_start, seed_start + config["seeds"]))
+        audit.fields(location, child, {"seeds": seeds})
+        phase = directory.name
+        parameters = scenario_parameters["cmdp" if phase == "cmdp_robustness" else phase]
+        environment = {field: config[option] for field, option in parameters.items()}
+        if phase != "cmdp_robustness":
+            audit.fields(f"{location} configuration", child["configuration"], environment)
+            continue
+        for name in ("budget", "group_imbalance", "fairness_strength"):
+            sweep = json_file(directory / "sweeps" / name / "config.json")
+            sweep_location = f"{location} sweep={name}"
+            baseline = sweep["default_phase3_parameters"]
+            audit.fields(sweep_location, sweep, {"seeds": seeds})
+            audit.fields(f"{sweep_location} baseline", baseline, environment)
+            for case in sweep["cases"]:
+                case_environment = baseline.copy()
+                if name == "budget":
+                    case_environment["initial_capital"] *= case["value"]
+                elif name == "group_imbalance":
+                    case_environment["marginalized_probability"] = case["value"]
+                audit.fields(f"{sweep_location} case={case['value'], case['parameter_kind']}",
+                             case["environment"], case_environment)
     audit.fields(str(root), manifest, {
         "expected_episodes": expected, "actual_episodes": actual, "status": "complete",
     })
