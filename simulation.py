@@ -64,6 +64,7 @@ class SyntheticBorrowerGenerator:
         if marginalized or reserved:
             base_income *= 0.82
         income = float(np.clip(base_income, 4_000, 220_000))
+        # Phases 2 and 3 use fixed loan bounds regardless of minimum_cost.
         requested_loan = float(
             np.clip(income * self.rng.uniform(0.08, 0.45), 1_000, 40_000)
         )

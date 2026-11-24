@@ -616,6 +616,14 @@ BASELINE_REQUIRED_FAIRNESS_FIELDS = (
 )
 
 
+BASELINE_REQUIRED_ACCOUNTING_FIELDS = (
+    "default_loss_by_horizon",
+    "unrecycled_successful_principal_by_horizon",
+    "pending_loans",
+    "capital_survival_ratio",
+)
+
+
 BASELINE_COMPARISON_METRICS = (
     "loans_funded",
     "cumulative_reward",
@@ -627,6 +635,7 @@ BASELINE_COMPARISON_METRICS = (
     "final_available_capital",
     "final_capital_at_risk",
     "eventual_terminal_capital",
+    *BASELINE_REQUIRED_ACCOUNTING_FIELDS,
     "demographic_parity_gap",
     *BASELINE_REQUIRED_FAIRNESS_FIELDS,
     "quota_satisfaction_rate",
@@ -650,6 +659,9 @@ def _baseline_frames_match(
         missing = [field for field in BASELINE_REQUIRED_FAIRNESS_FIELDS if field not in frame]
         if missing:
             errors.append(f"{label} missing required fairness fields: {', '.join(missing)}")
+        missing = [field for field in BASELINE_REQUIRED_ACCOUNTING_FIELDS if field not in frame]
+        if missing:
+            errors.append(f"{label} missing required accounting fields: {', '.join(missing)}")
     if not reference.index.equals(candidate.index):
         errors.append("policy/seed rows differ")
     if errors:
@@ -682,7 +694,7 @@ def validate_mode4_baselines(
     artifacts: Mapping[str, SweepArtifacts],
     output: Path,
 ) -> dict[str, object]:
-    """Verify that every Mode 4 default point reproduces Phase 3 exactly."""
+    """Compare Mode 4 sweep defaults for matching policy and seed rows."""
 
     budget = artifacts["budget"].raw_results
     imbalance = artifacts["group_imbalance"].raw_results
@@ -717,7 +729,7 @@ def validate_mode4_baselines(
     )
     if not result["all_passed"]:
         raise RuntimeError(
-            "Mode 4 default points do not reproduce the Phase 3 baseline: "
+            "Mode 4 sweep default points differ: "
             f"{result['differences']}"
         )
     return result
@@ -1112,7 +1124,10 @@ figcaption {{ font-size: .85rem; color: #4b5563; text-align: center; }}
 <h1>Phase 3 Robustness and Sensitivity Analysis — Mode 4</h1>
 <p class="note">This report contains only the existing Phase 3 CMDP policy family. Phase 1 arm policies and Phase 2 contextual-bandit policies were not run. Opportunity counts remain the denominators for demographic parity. Feasibility screens are reported separately from whether a policy satisfied a feasible constraint.</p>
 <p><strong>Run type:</strong> {'quick smoke test' if quick_test else 'full experiment'}; <strong>seeds:</strong> {escape(', '.join(map(str, seeds)))}.</p>
-<p class="winner">Baseline consistency check: {'passed' if baseline_consistency.get('all_passed') else 'failed'}. The budget multiplier 1.0, marginalized probability 0.20, and policy-specific fairness strength 1.0 reproduce their matching standard Phase 3 policy/seed results.</p>
+<p class="winner">Baseline consistency check: {'passed' if baseline_consistency.get('all_passed') else 'failed'}.
+This check compares the budget default (multiplier 1.0) with the group-imbalance default (marginalized probability 0.20)
+and the fairness-strength default (strength 1.0) for matching policy and seed rows.
+Comparison with a standalone Mode 3 run is planned for Phase 4.</p>
 {''.join(sections)}
 <h2>Reproducibility manifest</h2><pre>{escape(json.dumps(manifest, indent=2, sort_keys=True, default=str))}</pre>
 </body></html>"""

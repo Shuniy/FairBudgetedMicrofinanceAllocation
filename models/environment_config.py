@@ -29,7 +29,7 @@ class EnvironmentConfig:
     total_budget: float
     max_rounds: int
     seed: int = 0
-    minimum_cost: float = 0.01
+    minimum_cost: float = 0.01  # Lower bound for sampled Phase 1 arm costs.
 
     def __post_init__(self) -> None:
         if self.total_budget <= 0:
@@ -42,6 +42,8 @@ class EnvironmentConfig:
 
 @dataclass(frozen=True, slots=True)
 class ContextualEnvironmentConfig(EnvironmentConfig):
+    """Synthetic loan requests use fixed bounds of 1,000–40,000 regardless of minimum_cost."""
+
     pool_size: int = 20
     feedback_delay_rounds: int = 0
     female_probability: float = 0.50
@@ -75,6 +77,7 @@ class CMDPEnvironmentConfig:
     recycle_fraction: float = 1.0
     default_recovery_fraction: float = 0.0
     minimum_liquidity_reserve: float = 0.0
+    # The shared borrower generator uses fixed loan bounds regardless of this field.
     minimum_cost: float = 1_000.0
     seed: int = 0
     female_probability: float = 0.50

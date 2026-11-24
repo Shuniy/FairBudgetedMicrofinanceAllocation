@@ -89,6 +89,10 @@ def baseline_results() -> pd.DataFrame:
     return pd.DataFrame({
         "policy": ["example", "example"],
         "seed": [0, 1],
+        "default_loss_by_horizon": [1_500.0, 0.0],
+        "unrecycled_successful_principal_by_horizon": [300.0, 0.0],
+        "pending_loans": [2, 1],
+        "capital_survival_ratio": [0.97, 1.0],
         "feasible_dp_gap": [0.0, np.nan],
         "population_dp_gap": [0.0, np.nan],
         "feasible_dp_groups": [2, 1],
@@ -113,6 +117,26 @@ def test_baseline_matches_shuffled_rows_with_undefined_parity(baseline_results) 
     candidate = baseline_results.iloc[::-1]
 
     assert _baseline_frames_match(baseline_results, candidate) == (True, [])
+
+
+@pytest.mark.parametrize("field", [
+    "default_loss_by_horizon",
+    "unrecycled_successful_principal_by_horizon",
+    "pending_loans",
+    "capital_survival_ratio",
+])
+def test_baseline_compares_required_accounting_fields(baseline_results, field) -> None:
+    candidate = baseline_results.copy()
+    candidate.loc[0, field] /= 2
+    assert _baseline_frames_match(baseline_results, candidate) == (False, [field])
+
+    missing = baseline_results.drop(columns=field)
+    assert _baseline_frames_match(missing, baseline_results) == (
+        False, [f"reference missing required accounting fields: {field}"]
+    )
+    assert _baseline_frames_match(baseline_results, missing) == (
+        False, [f"candidate missing required accounting fields: {field}"]
+    )
 
 
 def test_baseline_reports_different_counts_with_matching_gaps(baseline_results) -> None:
