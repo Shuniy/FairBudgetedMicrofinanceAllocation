@@ -469,7 +469,7 @@ def _average_extreme_statement(
     policy = averages.idxmax() if highest else averages.idxmin()
     criterion = "highest" if highest else "lowest"
     return (
-        f"Across the tested {setting_label}, {policy} had the {criterion} "
+        f"Using defined means across the tested {setting_label}, {policy} had the {criterion} "
         f"average {metric.replace('_', ' ')} ({averages.loc[policy]:.4f})."
     )
 
@@ -531,18 +531,17 @@ def build_sweep_summary(
                 and not tight_gap_rows.empty
             ):
                 tight_reward = float(tight_reward_rows.iloc[0]["metric_mean"])
-                reward_change = (
-                    100.0 * (tight_reward - baseline_reward) / baseline_reward
-                    if abs(baseline_reward) > 1e-12
-                    else 0.0
-                )
                 baseline_gap = float(baseline_gap_rows.iloc[0]["metric_mean"])
                 tight_gap = float(tight_gap_rows.iloc[0]["metric_mean"])
+                reward_change = (
+                    f"{100.0 * (tight_reward - baseline_reward) / baseline_reward:+.2f}%"
+                    if baseline_reward else "an undefined percentage (zero baseline)"
+                )
                 statements.append(
                     f"For the default-setting reward leader {reference_policy}, "
-                    f"reducing initial capital to {tight_value:.0%} changed "
-                    f"eventual reward by {reward_change:+.2f}% and feasible parity gap "
-                    f"by {tight_gap - baseline_gap:+.4f}."
+                    f"at {tight_value:.0%} of base initial capital, "
+                    f"eventual reward differed by {reward_change} and feasible parity gap "
+                    f"by {tight_gap - baseline_gap:+.4f} relative to the baseline setting."
                 )
         quota = _metric_rows(aggregate, "quota_satisfaction_rate")
         for policy, frame in quota.groupby("policy"):
@@ -550,7 +549,7 @@ def build_sweep_summary(
                 continue
             maintained = int((frame["metric_mean"] >= 1.0 - 1e-12).sum())
             statements.append(
-                f"{policy} maintained mean quota satisfaction of 1.0 in "
+                f"{policy} had a mean fraction of individual quota targets met of 1.0 in "
                 f"{maintained} of {len(frame)} budget settings."
             )
     elif sweep_name == "group_imbalance":
@@ -565,13 +564,14 @@ def build_sweep_summary(
             if settings.empty:
                 statements.append(
                     f"{policy} did not satisfy both final fairness thresholds "
-                    "for every seed at any tested minority-share setting."
+                    "for every seed at any tested marginalized-community probability."
                 )
             else:
+                values = ", ".join(f"{value:.0%}" for value in sorted(settings))
                 statements.append(
                     f"{policy} satisfied both final fairness thresholds for "
-                    f"every seed down to configured minority share "
-                    f"{settings.min():.0%}."
+                    f"every seed at marginalized-community probabilities of {values} "
+                    f"({len(settings)} of {len(frame)} settings)."
                 )
     elif sweep_name == "fairness_strength":
         reward_rows = _metric_rows(aggregate, "eventual_cumulative_reward")
@@ -583,22 +583,21 @@ def build_sweep_summary(
             suffixes=("_reward", "_gap"),
         )
         for policy, frame in frontier.groupby("policy"):
-            best_gap = frame.loc[frame["metric_mean_gap"].idxmin()]
             reference = frame.loc[np.isclose(frame["sweep_value"], 0.0)]
             if reference.empty:
                 continue
+            best_gap = frame.loc[frame["metric_mean_gap"].idxmin()]
             reference_reward = float(reference.iloc[0]["metric_mean_reward"])
             reward_at_gap = float(best_gap["metric_mean_reward"])
-            reduction = (
-                100.0 * (reference_reward - reward_at_gap) / reference_reward
-                if abs(reference_reward) > 1e-12
-                else 0.0
+            reward_change = (
+                f"{100.0 * (reward_at_gap - reference_reward) / reference_reward:+.2f}%"
+                if reference_reward else "an undefined percentage (zero baseline)"
             )
             statements.append(
                 f"For {policy}, the lowest mean feasible parity gap occurred at strength "
                 f"{float(best_gap['sweep_value']):g} "
                 f"({float(best_gap['metric_mean_gap']):.4f}); eventual reward "
-                f"changed by {-reduction:+.2f}% relative to strength 0."
+                f"differed by {reward_change} relative to strength 0."
             )
     return tuple(statements)
 
@@ -996,10 +995,10 @@ def _summary_table(artifact: SweepArtifacts) -> str:
             "parameter_kind": "Parameter",
             "policy": "Policy",
             "is_baseline": "Default",
-            "eventual_cumulative_reward": "Eventual reward mean [95% CI]",
+            "eventual_cumulative_reward": "Eventual successful repayments mean [95% CI]",
             "feasible_dp_gap": "Feasible DP gap mean [95% CI]",
             "population_dp_gap": "Population DP gap mean [95% CI]",
-            "quota_satisfaction_rate": "Quota satisfaction mean [95% CI]",
+            "quota_satisfaction_rate": "Fraction of quota targets met mean [95% CI]",
             "reward_per_cost": "Reward/cost mean [95% CI]",
             "constraint_satisfaction_rate": "Feasible joint satisfaction [95% CI]",
             "population_constraint_satisfaction_rate": "Population joint satisfaction [95% CI]",
@@ -1126,7 +1125,7 @@ figcaption {{ font-size: .85rem; color: #4b5563; text-align: center; }}
 @media (max-width: 520px) {{ .plots {{ grid-template-columns: 1fr; }} }}
 </style></head><body>
 <h1>Phase 3 Robustness and Sensitivity Analysis — Mode 4</h1>
-<p class="note">This report contains only the existing Phase 3 CMDP policy family. Phase 1 arm policies and Phase 2 contextual-bandit policies were not run. Opportunity counts remain the denominators for demographic parity. Feasibility screens are reported separately from whether a policy satisfied a feasible constraint.</p>
+<p class="note">These sweeps use Phase 3 portfolio experiment policies. Demographic parity uses applicant opportunity counts as denominators. The separate opportunity-count screens and observed episode compliance answer different questions.</p>
 <p><strong>Run type:</strong> {'quick smoke test' if quick_test else 'full experiment'}; <strong>seeds:</strong> {escape(', '.join(map(str, seeds)))}.</p>
 <p class="winner">Baseline consistency check: {'passed' if baseline_consistency.get('all_passed') else 'failed'}.
 This check compares the budget default (multiplier 1.0) with the group-imbalance default (marginalized probability 0.20)

@@ -1,10 +1,12 @@
 # Fair Budgeted Microfinance
 
-This project simulates a lender deciding which loans to fund with limited money. It compares strategies that learn from repayments, account for loan costs, and try to give different borrower groups access to funding.
+A reproducible, phased experimental investigation of fairness-aware and budget-aware sequential microfinance allocation. It progresses from group-level multi-armed bandits to contextual learning and stateful capital management under delayed repayment. The simulation compares how existing policies allocate limited principal, earn successful repayments, and distribute access to funding.
 
-Choose a phase, and follow its command through the functions to the saved results.
+- [Mathematical formulation](MATHEMATICAL_FORMULATION.md) describes the simulator, policy equations, and evaluation metrics.
+- [Research findings](RESEARCH_FINDINGS.md) traces conclusions and hypothesis assessments to the corrected experiments.
+- [Phase 5 verification](PHASE_5_VERIFICATION.md) records the checks and the remaining evidence limitations.
 
-> **Historical experimental results.** The numerical examples in this README and the dissertation outputs in `outputs/` predate simulation version 2. Use a separate output directory for the current simulator. The two run generations use different random draws, feedback timing and fairness reporting conventions.
+The corrected simulation-version-2 archive is `outputs/phase4.1/`. The older dissertation outputs use different random streams, feedback timing, and fairness reporting conventions. Generated outputs are excluded from Git. Use the reproduction commands below to create an output archive from a checkout.
 
 ## Contents
 
@@ -18,17 +20,13 @@ Choose a phase, and follow its command through the functions to the saved result
   - [Phase 1: learn about borrower groups — Mode 1](#phase-1-learn-about-borrower-groups--mode-1)
     - [Function order and data flow](#function-order-and-data-flow)
     - [Algorithms in brief](#algorithms-in-brief)
-    - [Read a saved example](#read-a-saved-example)
   - [Phase 2: learn from individual applications — Mode 2](#phase-2-learn-from-individual-applications--mode-2)
     - [Function order and data flow](#function-order-and-data-flow-1)
     - [Algorithms in brief](#algorithms-in-brief-1)
-    - [Read a saved example](#read-a-saved-example-1)
   - [Phase 3: manage an ongoing loan portfolio — Mode 3](#phase-3-manage-an-ongoing-loan-portfolio--mode-3)
     - [Follow this command from start to finish](#follow-this-command-from-start-to-finish)
     - [The round loop](#the-round-loop)
     - [Algorithms in brief](#algorithms-in-brief-2)
-    - [Follow three saved loans through maturity](#follow-three-saved-loans-through-maturity)
-    - [Read the saved comparison](#read-the-saved-comparison)
   - [Mode 4: test changing conditions](#mode-4-test-changing-conditions)
   - [Mode 5: run the complete suite and scenarios](#mode-5-run-the-complete-suite-and-scenarios)
   - [Reproduce and verify the experiments](#reproduce-and-verify-the-experiments)
@@ -63,7 +61,7 @@ Imagine having enough money to fund only some of the applications on your desk. 
 
 Each episode starts with a fresh budget and fresh learning state. Ten seeds mean ten separate trials, not ten stages of one trained model. Within a configuration, the same seed gives policies a common stream of offers and potential repayments for corresponding rounds.
 
-The data is synthetic. Phase 1 uses configured group distributions; Phases 2–3 generate applications. There is no real borrower dataset to download. These experiments compare strategies under the simulator's assumptions.
+The data is synthetic. Phase 1 uses configured group distributions and Phases 2–3 generate applications. The results describe repayment and allocation under the simulator's assumptions. The study's contribution is an auditable comparison across the three environments. [Research limitations](RESEARCH_FINDINGS.md#limits-on-the-claims).
 
 ## Choose a mode and understand the command
 
@@ -77,9 +75,9 @@ The data is synthetic. Phase 1 uses configured group distributions; Phases 2–3
 | 4 | `sweeps` or `robustness` | How do Phase 3 results change with capital, population, or fairness settings? | Base capital 600,000 | `outputs/cmdp_robustness/` |
 | 5 | `all` | Modes 1–4, followed by ten generated scenarios, each running Modes 1–4 | Phase-specific | `outputs/` and `outputs/all_scenarios/` |
 
-To read existing results, open [the combined report](outputs/report.html), [Phase 2 report](outputs/contextual/report.html), [Phase 3 report](outputs/cmdp/report.html), or [sweep report](outputs/cmdp_robustness/report.html) in a browser. No installation or experiment run is needed for this.
+If the corrected archive is available locally, open its [combined report](outputs/phase4.1/report.html), [Phase 2 report](outputs/phase4.1/contextual/report.html), [Phase 3 report](outputs/phase4.1/cmdp/report.html), or [sweep report](outputs/phase4.1/cmdp_robustness/report.html).
 
-To run experiments yourself, open a terminal in this repository. Use Python 3.10 or newer; the saved main-run manifests record Python 3.13.5. An isolated environment keeps the project's packages together:
+To run experiments yourself, open a terminal in this repository. Use Python 3.10 or newer; the corrected run manifests record Python 3.10.19. An isolated environment keeps the project's packages together:
 
 ```bash
 python -m venv .venv
@@ -102,8 +100,6 @@ python main.py --mode 1 --seeds 1 --rounds 10 --output outputs/my_first_run
 Read this from left to right: `python` starts Python; `main.py` is the entry file; `--mode 1` chooses the group experiment; `--seeds 1` runs every policy once; `--rounds 10` allows at most ten decisions per episode; `--output` chooses the destination. A **flag** is an option beginning with `--`; its following value supplies the setting. This command still compares all 13 Phase 1 policies.
 
 Each episode seed creates three NumPy streams for offers, potential repayments, and policy decisions. The same seed and environment settings give policies the same offers and potential repayments. Affordability and the loans actually issued depend on each policy's decisions.
-
-The saved results and numerical examples below predate simulation version 2. Regenerate experimental outputs before using them as results from the current simulator.
 
 The ordinary phase commands are:
 
@@ -176,7 +172,7 @@ The generator uses a logistic formula to create hidden repayment probabilities b
 
 For readers following the mathematics, the ridge update is `A ← A + x xᵀ`, `b ← b + r x`, with weights `θ = solve(A, b)`. Here `x` is one borrower's feature vector and `r` is 0 or 1. The prediction is `xᵀθ`. These linear estimates and exploration scores are not automatically probabilities in the range 0–1.
 
-The default vector excludes the primary audit group, protected indicators, age, poverty-relief score and vulnerability score. Protected attributes and scores remain on the borrower for monitoring and other existing uses. The optional protected representation has 33 features. Legitimate predictors can still correlate with protected attributes.
+The default vector excludes the primary audit group, protected indicators, age, poverty-relief score and vulnerability score. Protected attributes and scores remain on the borrower for monitoring and other existing uses. The optional protected representation has 33 features. Predictors such as income and region can still carry demographic information. The generator itself adjusts income for marginalized or reserved status.
 
 ## Phase 1: learn about borrower groups — Mode 1
 
@@ -242,31 +238,7 @@ In [Algorithms/bandit.py](Algorithms/bandit.py), `ArmPolicy` tracks trial counts
 
 All policies obey affordability. Cost-aware policies additionally use cost to decide *which* affordable option to prefer. UCB's bonus is `sqrt(2 × ln(max(2, t + 1)) / n)`, where `n` is that group's observed count and `t` is the total number of updates. Untested groups receive infinite scores to encourage initial exploration.
 
-### Read a saved example
-
-In [the historical episode summaries](outputs/arm/episode_summaries.csv), `budgeted_ucb`, seed 0, funded 135 loans, obtained 71 successful repayments, and spent 597.7302:
-
-```text
-Repayment rate     = 71 / 135       = 52.59%
-Reward per cost    = 71 / 597.7302  = 0.11878 successes per budget unit
-Budget utilization = 597.7302 / 600 = 99.62%
-Remaining budget  = 600 − 597.7302  = 2.2698
-```
-
-It funded A/B/C respectively 5/12/118 times. Only C met its target, so quota satisfaction was `1 / 3 = 33.33%`. These counts give an allocation-share gap of `(118 − 5) / 135 ≈ 0.83704` under the current definition.
-
-Across ten seeds, [the aggregate results](outputs/arm/aggregate_results.csv) show:
-
-| Policy | Mean successful repayments | Repayment rate | Reward per cost | Quota satisfaction |
-| --- | ---: | ---: | ---: | ---: |
-| `true_reward_per_cost` | 75.0 | 50.07% | 0.1261 | 33.33% |
-| `budgeted_ucb` / `fractional_kube` | 70.8 each | 55.71% | 0.1183 | 33.33% |
-| `fair_ucb_hard` | 54.5 | 62.23% | 0.0911 | 93.33% |
-| `epsilon_greedy` | 41.0 | 70.62% | 0.0685 | 33.33% |
-
-Why can a lower repayment percentage produce more repayments? Using mean costs, C offers `0.50 / 4 = 0.125` expected successes per unit, whereas A offers `0.80 / 12 ≈ 0.0667`. Cheaper loans permit more trials. The identical Budgeted UCB/Fractional KUBE results reflect their matching scoring rules. The informed greedy benchmark ranks the offers available at each decision.
-
-Correcting forced initial exploration can change the epsilon-greedy and decaying epsilon-greedy trajectories.
+In the corrected default run, Budgeted UCB averaged 67.4 successful repayments with a 53.2% repayment rate. UCB averaged 45.1 successes with a 67.7% repayment rate. Budgeted UCB also had a larger allocation-share gap. [Phase 1 findings and evidence](RESEARCH_FINDINGS.md#phase-1-group-level-bandits).
 
 ## Phase 2: learn from individual applications — Mode 2
 
@@ -313,26 +285,9 @@ All three learning families use the same type of ridge learner. Their exploratio
 | LinUCB | Choose predicted reward plus an uncertainty bonus based on how well the features have been observed. The runner uses bonus coefficient `alpha = 0.70`. |
 | Contextual Thompson sampling | Sample plausible feature weights, then choose using their predicted rewards. The runner uses sampling scale `0.30`. |
 
-The 14 saved policies comprise a random baseline, the informed greedy true reward-per-cost benchmark (`true_contextual_reward_per_cost`), three ordinary learning policies, three `budgeted_...` policies, and six fairness variants. Budgeted variants divide reward scores by loan cost. `fair_epsilon_greedy_hard/soft`, `fair_linucb_hard/soft`, and `fair_thompson_hard/soft` wrap the budgeted learners. Hard wrappers restrict choices for fairness and soft wrappers add a quota-shortfall bonus with coefficient 0.015. The ordinary names are `contextual_epsilon_greedy`, `linucb`, and `contextual_thompson`.
+The 14 saved policies comprise a random baseline, the informed greedy true reward-per-cost benchmark (`true_contextual_reward_per_cost`), three ordinary learning policies, three `budgeted_...` policies, and six fairness variants. Budgeted variants divide reward scores by loan cost, with epsilon-greedy retaining cost-independent random exploration scores. `fair_epsilon_greedy_hard/soft`, `fair_linucb_hard/soft`, and `fair_thompson_hard/soft` wrap the budgeted learners. Hard wrappers restrict choices for fairness and soft wrappers add a quota-shortfall bonus with coefficient 0.015. The ordinary names are `contextual_epsilon_greedy`, `linucb`, and `contextual_thompson`.
 
-### Read a saved example
-
-In [the historical episode summaries](outputs/contextual/episode_summaries.csv), `fair_linucb_hard`, seed 0:
-
-- Funded 150 loans and obtained 113 repayments: `113 / 150 = 75.33%`.
-- Spent 436,512.60 of 600,000: utilization was **72.75%**. The 150-round limit explains why money remained.
-- Produced `113 / 436,512.60 × 10,000 ≈ 2.589` successful repayments per 10,000 units lent.
-- Met all four quotas, but had a parity gap of **2.265 percentage points**.
-
-[The ranked comparison](outputs/contextual/ranked_results.csv) averages ten seeds:
-
-| Rank | Policy | Successful repayments | Repayment rate | Parity gap (percentage points) | All mean fairness thresholds met? |
-| --- | --- | ---: | ---: | ---: | --- |
-| 1 | `fair_linucb_hard` | 112.1 | 74.73% | 1.202 | No |
-| 2 | `fair_thompson_hard` | 111.1 | 75.43% | 1.268 | No |
-| 3 | `fair_epsilon_greedy_hard` | 108.2 | 75.46% | 1.319 | No |
-
-All three have mean quota satisfaction 1.0. **No policy in this saved Phase 2 comparison meets both mean fairness thresholds.** First place is the smallest-violation compromise: its mean parity gap 0.01202 exceeds the configured 0.010 threshold. A first-place label alone does not establish fairness feasibility.
+In the corrected default run, cost-aware versions of all three contextual learning families averaged more successful repayments than their corresponding unnormalized versions. Hard-fair LinUCB led the joint-compliance ranking and met both terminal thresholds in six of ten episodes. [Phase 2 findings and evidence](RESEARCH_FINDINGS.md#phase-2-contextual-bandits).
 
 ## Phase 3: manage an ongoing loan portfolio — Mode 3
 
@@ -346,10 +301,10 @@ A **Constrained Markov Decision Process (CMDP)** describes lending decisions wit
 python main.py --mode 3
 ```
 
-This is equivalent to explicitly supplying these defaults:
+This command supplies the same experimental settings and uses a separate output directory.
 
 ```bash
-python main.py --mode 3 --budget 600000 --rounds 150 --seeds 10 --pool-size 20 --batch-size 3 --repayment-delay 8 --recycle-fraction 1.0 --default-recovery 0.0 --liquidity-reserve 0 --parity-tolerance 0.05 --output outputs/cmdp
+python main.py --mode 3 --budget 600000 --rounds 150 --seeds 10 --pool-size 20 --batch-size 3 --repayment-delay 8 --recycle-fraction 1.0 --default-recovery 0.0 --liquidity-reserve 0 --parity-tolerance 0.05 --output outputs/my_cmdp_run
 ```
 
 Each policy starts with 600,000 cash units. Each round offers 20 applicants and allows up to three loans. Loans mature eight rounds after funding. A repaid loan returns its full principal; a default returns nothing under these defaults. There is no interest income. Twelve policies × ten seeds gives **120 episodes**, each permitting up to `150 × 3 = 450` loans.
@@ -359,7 +314,7 @@ Each policy starts with 600,000 cash units. Each round offers 20 applicants and 
 3. `run_cmdp(args)` builds a `CMDPEnvironmentConfig`, a `BorrowerFeatureEncoder`, seeds 0–9, and the factories from `build_cmdp_policy_factories()`.
 4. `compare_cmdp_policies()` loops over policies, and within each policy over seeds. It creates a fresh `StatefulMicrofinanceCMDPEnv` and policy, then calls `run_cmdp_episode()`.
 5. `run_cmdp_episode()` resets both objects and performs the round loop below. It returns summary, trajectory, funding-log, and maturity-log tables.
-6. `save_cmdp_results()` saves the combined tables and plots. `save_evaluation_report()` ranks aggregate results and writes the report, settings manifest, and winner summary. `display_results()` prints the comparison and destination.
+6. `save_cmdp_results()` saves the combined tables and plots. `save_evaluation_report()` ranks aggregate results and writes the report, settings manifest, and ranking summary. `display_results()` prints the comparison and destination.
 
 ### The round loop
 
@@ -408,55 +363,18 @@ At round end, Lagrangian policies update their fairness penalty weights. Advanci
 | `cmdp_fair_lagrangian_...` | Wrap the same three families with adaptive penalties for projected fairness violations: three policies. |
 | `oracle_portfolio` | Informed Portfolio-Aware Heuristic. It subtracts a liquidity-dependent capital-use penalty from the true repayment probability. |
 
-For portfolio LinUCB, the score is approximately:
+Portfolio LinUCB uses this score.
 
 ```text
 predicted reward + uncertainty bonus
-− shadow price × (requested loan / median loan in the current pool)
+− shadow price × (requested loan / max(1, median loan in the remaining pool))
 ```
 
-A **shadow price** is the heuristic score penalty per unit of normalized loan cost. For portfolio LinUCB and epsilon-greedy, it increases with liquidity pressure and default losses, while principal due soon provides relief. Portfolio Thompson sampling and the Informed Portfolio-Aware Heuristic use a simpler liquidity-dependent penalty. The ridge model now uses the borrower's 25 default features.
+A **shadow price** is the heuristic score penalty per unit of normalized loan cost. For portfolio LinUCB and epsilon-greedy, it increases with liquidity pressure and default losses, while principal due soon provides relief. Portfolio Thompson sampling and the Informed Portfolio-Aware Heuristic use a simpler liquidity-dependent penalty. The ridge model uses the borrower's 25 default features.
 
 The Lagrangian wrapper normalizes base scores and subtracts penalties for projected quota deficits and parity excess. Its `lambda_quota` and `lambda_parity` weights adapt after a five-round warmup, starting at 0.20 with learning rate 0.20 and a cap of 8. Larger weights make fairness violations more costly to the selection rule.
 
-### Follow three saved loans through maturity
-
-Filter the historical [funding_log.csv](outputs/cmdp/funding_log.csv) to `policy = cmdp_fair_hard_linucb`, `seed = 0`, `round = 0`:
-
-| Applicant | Audit group | Principal | Eventual outcome | Due round |
-| --- | --- | ---: | --- | ---: |
-| `APP-0000008` | women | 5,260.26 | Repaid | 8 |
-| `APP-0000002` | minority | 5,259.91 | Defaulted | 8 |
-| `APP-0000006` | reserved | 11,106.21 | Repaid | 8 |
-
-At the end of round 0, cash is `600,000 − 21,626.38 = 578,373.62`, capital at risk is 21,626.38, and all three outcomes are pending for learning. At round 8, [maturity_log.csv](outputs/cmdp/maturity_log.csv) records returned cash of `5,260.26 + 0 + 11,106.21 = 16,366.47`. The learner receives success, default, success with the original features. Other loans issued in between also affect the round-8 cash balance.
-
-### Read the saved comparison
-
-From the historical [ranked_results.csv](outputs/cmdp/ranked_results.csv), averaged over ten seeds:
-
-| Rank | Policy | Successful repayments | Repayment rate | Successes per 10,000 lent | Parity gap (percentage points) | Fairness feasible? |
-| --- | --- | ---: | ---: | ---: | ---: | --- |
-| 1 | `cmdp_fair_hard_linucb` | 349.9 | 77.76% | 1.911 | 4.07 | Yes |
-| 2 | `cmdp_fair_hard_epsilon_greedy` | 350.2 | 77.86% | 1.821 | 3.34 | Yes |
-| 3 | `cmdp_fair_hard_thompson` | 343.7 | 77.01% | 1.798 | 4.16 | Yes |
-| 5 | `oracle_portfolio` | 370.9 | 82.42% | 2.687 | 6.92 | No |
-
-The first policy ranks highest because it meets the mean fairness thresholds and has the best reward per cost among policies that meet them. The Informed Portfolio-Aware Heuristic has more repayments and exceeds the mean parity threshold.
-
-For `cmdp_fair_hard_linucb`, seed 0, [the episode summary](outputs/cmdp/episode_summaries.csv) gives a concrete capital example:
-
-```text
-Loans funded                         450
-Eventual successful repayments       359
-Repayments observed by the horizon   346
-Principal disbursed                   1,821,191.78
-Final available cash                  213,780.85
-Final outstanding principal           65,664.47
-Eventual terminal capital             251,314.99
-```
-
-Turnover is `1,821,191.78 / 600,000 = 3.0353`: returned cash has been lent again. Capital survival is `(213,780.85 + 65,664.47) / 600,000 = 46.57%`, counting outstanding principal at face value. Eventual terminal capital instead uses the hidden future returns of pending loans. The 13 additional eventual successes (`359 − 346`) have not yet been observed at the horizon.
+In the corrected default run, hard-fair portfolio LinUCB led the joint-compliance ranking with nine passes in ten episodes. The informed portfolio heuristic led by eventual successful repayments and passed both thresholds in three of ten episodes. The simulator’s capital accounting includes cash returned at maturity and values pending principal separately. [Phase 3 findings and evidence](RESEARCH_FINDINGS.md#phase-3-portfolio-policies).
 
 ## Mode 4: test changing conditions
 
@@ -490,7 +408,7 @@ Each case reuses the Phase 3 loop. Extra fields such as `sweep_value`, `paramete
 
 Sweep aggregates report feasible joint constraint satisfaction as `constraint_satisfaction_rate`. Feasible joint, population parity, and population joint rates divide successful episodes by all evaluated episodes. Undefined parity and joint outcomes stay blank in the raw CSV, and the aggregate CSV records how many episodes had evaluable parity.
 
-The historical [budget summary](outputs/cmdp_robustness/sweeps/budget/summary.json) records 183 of 600 episodes satisfying both final fairness thresholds. The [group-imbalance summary](outputs/cmdp_robustness/sweeps/group_imbalance/summary.json) records 125 of 600, and the [fairness-strength summary](outputs/cmdp_robustness/sweeps/fairness_strength/summary.json) records 189 of 360. These are counts across the policies, settings, and seeds in each sweep, not success rates for an individual algorithm. All three hard-policy families maintained mean quota satisfaction 1.0 at all five budget settings, but that alone does not establish parity compliance.
+The corrected sweeps show that joint compliance varies with capital, the applicant generator, and the definition of fairness strength. Consult the per-policy, per-setting aggregates when comparing compliance. [Sweep findings and evidence](RESEARCH_FINDINGS.md#phase-3-sensitivity-sweeps).
 
 For a smaller standalone sweep:
 
@@ -524,7 +442,7 @@ flowchart TD
 
 `generate_scenarios()` prepares ten repeatable configurations using master seed 5726455. Scenarios vary budgets, horizons, populations of applicants per round, delays, lending limits, and capital-return settings. Each gets its own seed range and a separate Phase 1 budget. `run_scenario()` converts its settings into command arguments and passes them through the same parser used by individual runs.
 
-The main suite writes `arm/`, `contextual/`, `cmdp/`, and `cmdp_robustness/` beneath `outputs/` or your `--output` root. It writes [report.html](outputs/report.html), [combined_aggregate_results.csv](outputs/combined_aggregate_results.csv), and [run_manifest.json](outputs/run_manifest.json) at that root. The historical combined CSV contains **39 policy rows: 13 + 14 + 12** from Modes 1–3. Sweep results remain in their sweep folders; phases are not ranked against one another.
+The main suite writes `arm/`, `contextual/`, `cmdp/`, and `cmdp_robustness/` beneath `outputs/` or your `--output` root. It writes `report.html`, `combined_aggregate_results.csv`, and `run_manifest.json` at that root. The combined CSV contains 39 policy rows from Modes 1–3. Sweep results remain in their sweep folders; phases are not ranked against one another.
 
 Scenario results go to `all_scenarios/scenario_1/`, and so on, beneath the same root. Each scenario contains the four mode folders. Directories are created before execution, so an existing folder alone is not evidence of a completed run. The runner starts from the beginning and has no resume logic.
 
@@ -540,6 +458,8 @@ MPLBACKEND=Agg python -u main.py --mode 5 --verify --output outputs/reproduction
 python verify_results.py outputs/reproduction --report outputs/reproduction/recheck.json
 ```
 
+To audit an existing corrected archive directly, run `python verify_results.py outputs/phase4.1`. The manifest next to the combined table records the environment that generated the archive.
+
 Choose a fresh output directory. Mode 5 runs the three default experiments, the three Phase 3 sweeps, and the ten original operating configurations with their nested sweeps. The full suite contains 25,740 episodes and the main suite uses seeds 0–9. Each scenario manifest records its own seed range and settings. The full run can take hours and produces several gigabytes of audit logs. `--verify` checks the default runs before starting the sweeps, checks the sweep results and their matching Phase 3 baselines before starting the scenarios, and checks the full saved tree at completion. Reports appear as `verification_defaults.json`, `verification_robustness.json` and `verification_summary.json`.
 
 The following CMDP smoke run uses two seeds and a short horizon.
@@ -551,7 +471,7 @@ python verify_results.py outputs/smoke/cmdp
 
 The verifier also accepts individual phase or sweep directories. It replays funding and maturity in round order to check financial accounting, observed and eventual rewards, capital conservation, and funding feasibility. It rebuilds fairness counts and denominators from opening pools and cash, then checks episode metrics, aggregate statistics, and paired policy comparisons. For policies with the same seed and configuration, it compares logged opening pools over shared rounds and checks repayment probabilities and outcomes for shared funded opportunities. For a full suite, it checks each scenario's child configurations and seed lists against the parent manifest.
 
-Opening pools record opportunity identifiers, fairness groups, and costs. Complete applicant feature vectors and repayment outcomes for unfunded opportunities are absent from the saved outputs. The verifier reports these limits under `could_not_independently_verify`. The simulator-level and mathematical tests cover full contextual stream consistency, learning behavior, and the information available to policies.
+Opening pools record opportunity identifiers, fairness groups, and costs. Complete applicant feature vectors and repayment outcomes for unfunded opportunities are absent from the saved outputs. The verifier audits fields available in the saved records. `could_not_independently_verify` lists unavailable checks flagged by the verifier and does not certify that unlogged features or potential outcomes were reconstructed. The simulator-level and mathematical tests cover full contextual stream consistency, learning behavior, and the information available to policies.
 
 Counts use integer comparisons. Floating-point results use absolute tolerance `1e-8` and relative tolerance `1e-12`. Fairness thresholds and the quota tolerance of `1e-12` follow the metric definitions below. A discrepancy returns a non-zero exit code and identifies its location. The report counts every failed check and lists up to the first 100 discrepancies. Verification leaves existing experiment tables untouched.
 
@@ -565,7 +485,7 @@ Phase 1 compares groups' shares of all loans. Phases 2–3 compare the fraction 
 | --- | --- | --- |
 | Allocation share | Group's funded loans ÷ all funded loans | 137 of 450 loans gives 30.44%. |
 | Phase 1 allocation-share gap | Highest allocation share − lowest allocation share across configured groups | Shares of 50%, 30% and 20% give 0.30. |
-| Population funding rate | Group's funded loans ÷ all eligible applicants arriving in that group | 20 of 100 arrivals gives 20%. |
+| Population funding rate | Group's funded loans ÷ all applicants arriving in that group | 20 of 100 arrivals gives 20%. |
 | Feasible-opportunity funding rate | Group's funded loans ÷ applicants affordable at pool arrival in that group | 20 of 50 affordable arrivals gives 40%. |
 | Population or feasible demographic parity gap | Highest group funding rate − lowest group funding rate, using the designated denominator | A gap of 0.04 is four percentage points. |
 | Quota deficit | `max(0, target share − actual allocation share)` | Target 25%, actual 20% gives a deficit of 0.05. |
@@ -580,7 +500,7 @@ With no loans, all allocation shares are zero for quota calculations and Phase 1
 
 **Hard fairness** is a priority-based intervention. It looks for an eligible candidate in a group with a projected quota shortfall, then looks for one in the lowest-rate groups if parity exceeds tolerance. It delegates to the base policy on the full feasible set when neither restriction applies. Phase 1 preserves its affordable group-round intervention rate. Phases 2–3 use feasible-opportunity funding rates. **Soft fairness** adds a quota bonus to raw scores in Phases 1–2, so its effect depends on the base score scale. **Lagrangian fairness** in Phase 3 adapts penalty weights for projected violations. See the formulas in [Mathematical formulation](MATHEMATICAL_FORMULATION.md#fairness-metrics-and-phase-12-wrappers).
 
-The Phase 1 hard wrapper uses parity tolerance **0.35**, Phase 2 uses **0.010**, and Phase 3 defaults to **0.05**. The command-line `--parity-tolerance` controls Phase 3 and its sweeps, not the Phase 1/2 constants.
+The Phase 1 hard wrapper uses parity tolerance **0.35**, Phase 2 uses **0.010**, and Phase 3 defaults to **0.05**. The command-line `--parity-tolerance` controls Phase 3 and its sweeps. Phases 1–2 use fixed thresholds. Terminal joint compliance also requires total quota deficit at most 0.01. Each episode contributes one pass or no pass. Undefined parity gives no joint pass and is counted separately.
 
 ## Read the results
 
@@ -596,7 +516,7 @@ The Phase 1 hard wrapper uses parity tolerance **0.35**, Phase 2 uses **0.010**,
 | `funding_log.csv` | One issued loan, including its hidden evaluator outcome; Mode 3 and sweeps. |
 | `maturity_log.csv` | One matured loan and the cash it returned; Mode 3 and sweeps. |
 | `run_manifest.json` | Run settings, episode seeds, policy parameters, random-stream convention, simulation version, software versions, Git provenance, expected and actual episode counts, and completion status. Sweep case settings are in the linked `config.json` files. |
-| `report.html`, `winner_summary.txt` | Readable comparison; winner summary is written for Modes 2–3. Standalone Mode 1 uses the printed table, CSVs, and plots. |
+| `report.html`, `winner_summary.txt` | Readable comparison; ranking summary is written for Modes 2–3. Standalone Mode 1 uses the printed table, CSVs, and plots. |
 | `*.png` | Plots of metric means over rounds; sweep plots compare parameter values. Check the axis and metric name before comparing. |
 | Sweep `raw_results.csv` | One episode plus its sweep settings and diagnostic metrics; this is the sweep summary table. |
 | Sweep `config.json`, `summary.json` | Exact sweep configuration and summarized findings/counts. |
@@ -655,7 +575,7 @@ The last trajectory row describes the final decision round. The episode summary 
 
 ### Ranking and sweep diagnostics
 
-Episode summaries record `parity_satisfied`, `quota_satisfied` and `constraint_satisfied`, with population parity and joint outcomes in separate `population_` fields. Parity and joint outcomes are blank when parity is undefined. Aggregate satisfaction rates divide the number of passes by all episodes. Evaluable episode counts and mean gaps are reported separately.
+Episode summaries record `parity_satisfied`, `quota_satisfied` and `constraint_satisfied`, with population parity and joint outcomes in separate `population_` fields. Parity and joint outcomes are blank when parity is undefined. Aggregate satisfaction rates divide the number of passes by all evaluated episodes. `quota_constraint_satisfaction_rate` measures passes against the total-deficit threshold. `quota_satisfaction_rate` measures the fraction of individual quotas met within numerical tolerance. Evaluable episode counts and mean gaps are reported separately.
 
 Modes 2–3 rank by feasible-opportunity joint satisfaction rate. For policies with incomplete compliance, mean threshold excess breaks ties, followed by reward per cost and cumulative reward. In these rankings, `fairness_feasible` indicates full observed joint compliance, while `mean_thresholds_met` describes the mean-based check. Mode 1 orders policies by mean cumulative reward.
 

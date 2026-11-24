@@ -15,6 +15,7 @@ from robustness import (
     CMDPSweepCase,
     _baseline_frames_match,
     aggregate_sweep_results,
+    build_sweep_summary,
     run_cmdp_sweep,
 )
 
@@ -51,6 +52,40 @@ def test_tidy_sweep_aggregation_includes_std_and_ci95() -> None:
     assert reward["metric_std"] == np.sqrt(8.0)
     assert reward["metric_ci95_low"] < 12.0 < reward["metric_ci95_high"]
     assert reward["n_seeds"] == 2
+
+
+def test_imbalance_summary_lists_only_settings_with_full_compliance() -> None:
+    aggregate = pd.DataFrame({
+        "policy": "cmdp_fair_hard_linucb",
+        "metric": "constraint_satisfaction_rate",
+        "sweep_value": [0.2, 0.3, 0.4],
+        "metric_mean": [1.0, 0.9, 1.0],
+    })
+
+    statement, = build_sweep_summary("group_imbalance", aggregate)
+
+    assert "marginalized-community probabilities of 20%, 40% (2 of 3 settings)." in statement
+
+
+@pytest.mark.parametrize("sweep_name, baseline, other", [
+    ("budget", 1.0, 0.5),
+    ("fairness_strength", 0.0, 1.0),
+])
+def test_sweep_summary_reports_undefined_relative_change_at_zero_reward(
+    sweep_name, baseline, other,
+) -> None:
+    aggregate = pd.DataFrame({
+        "policy": "cmdp_fair_hard_linucb",
+        "parameter_kind": "example",
+        "is_baseline": [True, False, True, False],
+        "metric": ["eventual_cumulative_reward"] * 2 + ["feasible_dp_gap"] * 2,
+        "sweep_value": [baseline, other] * 2,
+        "metric_mean": [0.0, 2.0, 0.1, 0.02],
+    })
+
+    statements = build_sweep_summary(sweep_name, aggregate)
+
+    assert any("undefined percentage (zero baseline)" in line for line in statements)
 
 
 def test_sweep_constraint_rates_use_all_episodes() -> None:

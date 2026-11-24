@@ -866,12 +866,12 @@ def rank_results(
 
 
 def winner_summary(ranked: pd.DataFrame, mode: str) -> str:
-    """Describe the deterministic winner selected from a ranked result table."""
+    """Describe the first-ranked policy for this configuration."""
 
     if ranked.empty:
         return f"{mode.title()} has no policies to rank."
     winner = ranked.iloc[0]
-    label = "Phase 2 contextual" if mode == "contextual" else "Phase 3 CMDP"
+    label = "Phase 2 contextual" if mode == "contextual" else "Phase 3 portfolio"
     reward_per_cost = float(winner["reward_per_cost_mean"])
     cumulative_reward = float(winner["cumulative_reward_mean"])
     parity_gap = winner["demographic_parity_gap_mean"]
@@ -885,8 +885,8 @@ def winner_summary(ranked: pd.DataFrame, mode: str) -> str:
     else:
         qualification = "It led the mean-based ranking. Episode compliance is unavailable"
     return (
-        f"{label} winner: {winner['policy']}. {qualification}, with mean "
-        f"reward-per-cost {reward_per_cost:.6f}, cumulative reward "
+        f"{label} ranking leader: {winner['policy']}. {qualification}, with mean "
+        f"reward-per-cost {reward_per_cost:.6f}, eventual successful repayments "
         f"{cumulative_reward:.3f}, feasible parity gap {gap_label}, and total "
         f"quota deficit {quota_deficit:.6f}."
     )
@@ -933,9 +933,9 @@ def format_ranked_table(ranked: pd.DataFrame, mode: str) -> str:
         "policy": "Policy",
         "constraint_satisfaction_rate": "Feasible Joint Rate",
         "population_constraint_satisfaction_rate": "Population Joint Rate",
-        "cumulative_reward_mean": "Reward",
+        "cumulative_reward_mean": "Eventual Successes",
         "reward_per_cost_mean": "Reward/Cost",
-        "repayment_rate_mean": "Repayment",
+        "repayment_rate_mean": "Repayment Rate",
         "demographic_parity_gap_mean": "Feasible DP Gap",
         "population_dp_gap_mean": "Population DP Gap",
         "total_quota_deficit_mean": "Quota Deficit",
@@ -1021,13 +1021,13 @@ def _html_ranked_table(ranked: pd.DataFrame, mode: str) -> str:
         {
             "Rank": ranked["rank"],
             "Policy": ranked["policy"],
-            "Reward (mean ± std)": _mean_std_column(
+            "Eventual successful repayments (mean ± std)": _mean_std_column(
                 ranked, "cumulative_reward"
             ),
             "Reward/cost (mean ± std)": _mean_std_column(
                 ranked, "reward_per_cost"
             ),
-            "Repayment (mean ± std)": _mean_std_column(
+            "Repayment rate (mean ± std)": _mean_std_column(
                 ranked, "repayment_rate"
             ),
             "Feasible DP gap (mean ± std)": _mean_std_column(
@@ -1129,13 +1129,19 @@ def save_evaluation_report(
         json.dumps(manifest, indent=2, sort_keys=True, default=str) + "\n",
         encoding="utf-8",
     )
-    title = "Phase 2 Contextual Bandits" if mode == "contextual" else "Phase 3 CMDP"
+    title = "Phase 2 Contextual Bandits" if mode == "contextual" else "Phase 3 Portfolio Policies"
+    benchmark_description = (
+        "The informed contextual benchmark greedily scores true repayment probability per unit principal."
+        if mode == "contextual"
+        else "The informed portfolio heuristic subtracts a liquidity-dependent cost penalty from true repayment probability."
+    )
     report = f"""<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
 <title>{escape(title)} evaluation</title><style>{REPORT_STYLE}</style></head>
 <body><h1>{escape(title)} evaluation</h1>
 <p class="winner">{escape(summary)}</p>
-<p class="note">Episode thresholds are {parity_tolerance:.6f} for parity and {quota_tolerance:.6f} for total quota deficit. Satisfaction rates use all runs, with evaluable counts shown separately. Ranking uses feasible-opportunity joint satisfaction first, then mean threshold excess among policies with incomplete compliance, then reward-per-cost and cumulative reward.</p>
+<p class="note">Episode thresholds are {parity_tolerance:.6f} for parity and {quota_tolerance:.6f} for total quota deficit. Satisfaction rates use all evaluated episodes, with parity evaluability shown separately. Ranking uses feasible-opportunity joint satisfaction first, then mean threshold excess among policies with incomplete compliance, then reward-per-cost and cumulative reward.</p>
+<p class="note">{escape(benchmark_description)} Ranking describes this simulated configuration.</p>
 <h2>Ranked results</h2>{_html_ranked_table(ranked, mode)}
 <h2>Reproducibility manifest</h2><pre>{escape(json.dumps(manifest, indent=2, sort_keys=True, default=str))}</pre>
 </body></html>"""
@@ -1171,17 +1177,17 @@ def save_combined_report(
         arm_table = arm[columns].rename(
             columns={
                 "policy": "Policy",
-                "cumulative_reward_mean": "Mean reward",
+                "cumulative_reward_mean": "Mean successful repayments",
                 "reward_per_cost_mean": "Mean reward/cost",
-                "repayment_rate_mean": "Mean repayment",
+                "repayment_rate_mean": "Mean repayment rate",
                 "allocation_share_gap_mean": "Mean allocation-share gap",
-                "quota_satisfaction_rate_mean": "Mean quota satisfaction",
+                "quota_satisfaction_rate_mean": "Mean fraction of quota targets met",
             }
         )
         sections.append(
             "<h2>Mode 1 — Arm Bandits</h2>"
             '<p class="note">Policies are ordered by mean cumulative reward; '
-            "this is a within-mode description, not a cross-mode ranking.</p>"
+            "the informed benchmark greedily scores true repayment probability per unit principal.</p>"
             f"{arm_table.to_html(index=False, border=0, classes='results arm-results', escape=True)}"
             '<p><a href="arm/aggregate_results.csv">Open Mode 1 aggregate results</a></p>'
         )
@@ -1192,7 +1198,7 @@ def save_combined_report(
         label = (
             "Mode 2 — Phase 2 Contextual"
             if mode == "contextual"
-            else "Mode 3 — Phase 3 CMDP"
+            else "Mode 3 — Phase 3 Portfolio Policies"
         )
         sections.append(
             f"<h2>{escape(label)}</h2><p class=\"winner\">"

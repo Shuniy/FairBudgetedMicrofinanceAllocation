@@ -775,7 +775,7 @@ def run_all(args: argparse.Namespace):
         arm_aggregate=results["arm"],
         sweep_report=output / "cmdp_robustness" / "report.html",
     )
-    print("\nPhase winners (not compared across phases):\n")
+    print("\nWithin-phase ranking leaders\n")
     print(winner_summary(ranked_results["contextual"], "contextual"))
     print(winner_summary(ranked_results["cmdp"], "cmdp"))
     print(f"\nSaved combined results to: {output.resolve()}")
