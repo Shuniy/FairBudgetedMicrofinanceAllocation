@@ -118,6 +118,15 @@ class SoftFairPolicy(_FairPolicy):
         self.penalty_lambda = penalty_lambda
         super().__init__(base_policy, target_shares, seed)
 
+    def select_action(
+        self,
+        env: BanditEnvironment,
+        candidates: Sequence[int] | None = None,
+    ) -> int:
+        if self.penalty_lambda == 0:
+            return self.base_policy.select_action(env, candidates)
+        return super().select_action(env, candidates)
+
     def scores(self, env: BanditEnvironment) -> np.ndarray:
         """Compute scores with bonuses for quota deficits."""
         scores = self.base_policy.scores(env).copy()

@@ -191,6 +191,7 @@ def test_lagrangian_scores_normalize_and_use_projected_shortfalls():
     assert policy.scores(env) == pytest.approx([0.56, -0.08, 0])
     no_penalty = LagrangianFairCMDPPolicy(base, replace(config, strength_scale=0))
     assert no_penalty.scores(env) == pytest.approx([1, 0, 0])
+    assert no_penalty.select_action(env) == base.select_action(env) == 0
     no_penalty.on_round_end(env)
     assert no_penalty.lambda_quota > config.initial_lambda_quota
     assert no_penalty.lambda_parity > config.initial_lambda_parity

@@ -286,3 +286,30 @@ def test_cmdp_zero_delay_recycles_and_updates_before_the_next_slot(monkeypatch):
     assert report.summary["repayment_rate"] == 0.5
     assert report.summary["reward_per_cost"] == 0.05
     assert report.summary["pending_loans"] == 0
+
+
+def test_binary_reward_and_cost_accounting():
+    class AlternatingPolicy(RandomPolicy):
+        def select_action(self, observation):
+            return observation.round_index % 2
+
+    arms = [ArmSpec("A", "A", 1, 4, 0), ArmSpec("B", "B", 0, 2, 0)]
+    env = BanditEnvironment.for_arms(arms, EnvironmentConfig(15, 4))
+    result = run_episode(env, AlternatingPolicy(2), seed=42)
+    assert result.trajectory["reward"].tolist() == [1, 0, 1, 0]
+    assert result.trajectory["cost"].tolist() == [4, 2, 4, 2]
+    assert result.trajectory["budget_remaining"].tolist() == [11, 9, 5, 3]
+    expected = dict(rounds=4, cumulative_reward=2, observed_reward_by_horizon=2,
+                    cumulative_cost=12, reward_per_cost=1/6, repayment_rate=0.5,
+                    budget_utilization=0.8, pending_feedback=0)
+    assert {key: result.summary[key] for key in expected} == expected
+
+
+def test_different_seeds_generate_different_applicants_and_potential_outcomes():
+    config = ContextualEnvironmentConfig(120_000, 2, pool_size=5)
+    env = BanditEnvironment.for_contextual(config)
+    env.reset(17)
+    first_pool, first_draws = pool_signature(env), env._outcome_draws.copy()
+    env.reset(18)
+    assert pool_signature(env) != first_pool
+    assert not np.array_equal(env._outcome_draws, first_draws)

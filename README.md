@@ -4,7 +4,7 @@ This project simulates a lender deciding which loans to fund with limited money.
 
 Choose a phase, and follow its command through the functions to the saved results.
 
-> **Historical experimental results.** The saved numerical examples, tables, and results in this README and `outputs/` predate `simulation_version: 2` and still await regeneration and independent verification with the corrected simulator. Changes to random-number generation, potential outcomes, termination conditions, and feedback timing may change numerical results and policy rankings across all three phases. The saved parity comparisons also use earlier fairness definitions. Updated results will replace these historical results after Phase 4 experimental verification.
+> **Historical experimental results.** The numerical examples in this README and the dissertation outputs in `outputs/` predate simulation version 2. Use a separate output directory for the current simulator. The two run generations use different random draws, feedback timing and fairness reporting conventions.
 
 ## Contents
 
@@ -31,6 +31,7 @@ Choose a phase, and follow its command through the functions to the saved result
     - [Read the saved comparison](#read-the-saved-comparison)
   - [Mode 4: test changing conditions](#mode-4-test-changing-conditions)
   - [Mode 5: run the complete suite and scenarios](#mode-5-run-the-complete-suite-and-scenarios)
+  - [Reproduce and verify the experiments](#reproduce-and-verify-the-experiments)
   - [What fairness means](#what-fairness-means)
   - [Read the results](#read-the-results)
     - [Which file should I open?](#which-file-should-i-open)
@@ -60,7 +61,7 @@ Imagine having enough money to fund only some of the applications on your desk. 
 | Horizon | The maximum number of rounds. It is a simulation time limit, not necessarily a number of days. |
 | Informed benchmark | A comparison policy allowed to use repayment probabilities hidden from ordinary learners. |
 
-Each episode starts with a fresh budget and fresh learning state. Ten seeds mean ten separate trials, not ten stages of one trained model. Policies can consume random draws differently, so using the same seed does not guarantee identical applicant sequences across policies.
+Each episode starts with a fresh budget and fresh learning state. Ten seeds mean ten separate trials, not ten stages of one trained model. Within a configuration, the same seed gives policies a common stream of offers and potential repayments for corresponding rounds.
 
 The data is synthetic. Phase 1 uses configured group distributions; Phases 2–3 generate applications. There is no real borrower dataset to download. These experiments compare strategies under the simulator's assumptions.
 
@@ -90,7 +91,7 @@ Activate it on macOS/Linux with `source .venv/bin/activate`, or in Windows Power
 python -m pip install -r requirements.txt
 ```
 
-If your system uses `python3`, substitute that for `python`. NumPy handles numerical arrays, pandas handles result tables, Matplotlib draws plots, and pytest is for development tests.
+If your system uses `python3`, substitute that for `python`. NumPy handles numerical arrays, pandas handles result tables, Matplotlib draws plots, SciPy provides statistical quantiles and intervals, and pytest runs the tests.
 
 For a small first experiment that saves separately from the supplied outputs:
 
@@ -485,7 +486,7 @@ flowchart TD
     G --> H["validate_mode4_baselines() → save_mode4_report()"]
 ```
 
-Each case reuses the Phase 3 loop. Extra fields such as `sweep_value`, `parameter_kind`, and `is_baseline` say which setting generated a row. Baseline validation compares the budget sweep default with the group-imbalance and fairness-strength defaults for shared policies and seeds. The check covers capital accounting, feasible and population parity gaps and group counts, episode-level compliance outcomes, and funding and opportunity counts by group. Both result frames must contain the required fairness and accounting fields. Phase 4 will verify the sweep defaults against a standalone Mode 3 run.
+Each case reuses the Phase 3 loop. Extra fields such as `sweep_value`, `parameter_kind`, and `is_baseline` say which setting generated a row. Baseline validation compares the budget sweep default with the group-imbalance and fairness-strength defaults for shared policies and seeds. The check covers capital accounting, feasible and population parity gaps and group counts, episode-level compliance outcomes, and funding and opportunity counts by group. Both result frames must contain the required fairness and accounting fields. The saved-output verifier also checks the sweep defaults against a matching Mode 3 run in the same output tree.
 
 Sweep aggregates report feasible joint constraint satisfaction as `constraint_satisfaction_rate`. Feasible joint, population parity, and population joint rates divide successful episodes by all evaluated episodes. Undefined parity and joint outcomes stay blank in the raw CSV, and the aggregate CSV records how many episodes had evaluable parity.
 
@@ -502,7 +503,7 @@ This uses at most two seeds and two values per sweep. Three rounds are shorter t
 ## Mode 5: run the complete suite and scenarios
 
 ```bash
-python main.py --mode 5
+python main.py --mode 5 --output outputs/reproduction
 ```
 
 **This executes Modes 1–4, then ten scenario runs that each execute Modes 1–4.** It does not just collect existing files.
@@ -512,13 +513,13 @@ flowchart TD
     A["main() → run_all()"] --> B["run_arm() → run_contextual() → run_cmdp()"]
     B --> C["combine_aggregate_results(): write combined CSV"]
     C --> D["run_cmdp_sweeps()"]
-    D --> E["Write suite manifest; save_combined_report()"]
+    D --> E["save_combined_report()"]
     E --> F["run_all_scenarios(): create all scenario directories"]
     F --> G["run_scenario(): read generated settings and call parse_args()"]
     G --> H["run_arm() → run_contextual() → run_cmdp() → run_cmdp_sweeps()"]
     H --> I{"More scenarios?"}
     I -->|Yes| G
-    I -->|No| J["Complete"]
+    I -->|No| J["Write suite manifest"]
 ```
 
 `generate_scenarios()` prepares ten repeatable configurations using master seed 5726455. Scenarios vary budgets, horizons, populations of applicants per round, delays, lending limits, and capital-return settings. Each gets its own seed range and a separate Phase 1 budget. `run_scenario()` converts its settings into command arguments and passes them through the same parser used by individual runs.
@@ -528,6 +529,29 @@ The main suite writes `arm/`, `contextual/`, `cmdp/`, and `cmdp_robustness/` ben
 Scenario results go to `all_scenarios/scenario_1/`, and so on, beneath the same root. Each scenario contains the four mode folders. Directories are created before execution, so an existing folder alone is not evidence of a completed run. The runner starts from the beginning and has no resume logic.
 
 `--quick-test --rounds 3 --seeds 2` reduces the main suite, including its sweeps, but **the ten scenarios still use their own full settings**. For a small first test, use the standalone Mode 1 or Mode 4 command above.
+
+## Reproduce and verify the experiments
+
+Run these commands after installing the dependencies.
+
+```bash
+python -m pytest -q
+MPLBACKEND=Agg python -u main.py --mode 5 --verify --output outputs/reproduction
+python verify_results.py outputs/reproduction --report outputs/reproduction/recheck.json
+```
+
+Choose a fresh output directory. Mode 5 runs the three default experiments, the three Phase 3 sweeps, and the ten original operating configurations with their nested sweeps. The full suite contains 25,740 episodes and the main suite uses seeds 0–9. Each scenario manifest records its own seed range and settings. The full run can take hours and produces several gigabytes of audit logs. `--verify` checks the default runs before starting the sweeps, checks the sweep results and their matching Phase 3 baselines before starting the scenarios, and checks the full saved tree at completion. Reports appear as `verification_defaults.json`, `verification_robustness.json` and `verification_summary.json`.
+
+The following CMDP smoke run uses two seeds and a short horizon.
+
+```bash
+MPLBACKEND=Agg python main.py --mode 3 --seeds 2 --rounds 4 --pool-size 4 --batch-size 2 --repayment-delay 1 --recycle-fraction .75 --default-recovery .25 --liquidity-reserve 10000 --output outputs/smoke/cmdp
+python verify_results.py outputs/smoke/cmdp
+```
+
+The verifier also accepts individual phase or sweep directories. It replays funding and maturity in round order, rebuilds opportunity counts from opening pools and opening cash, recomputes episode and aggregate metrics, and checks matching policy and seed records. Counts use integer comparisons. Floating-point results use absolute tolerance `1e-8` and relative tolerance `1e-12`. Fairness thresholds and the quota tolerance of `1e-12` follow the metric definitions below. A discrepancy returns a non-zero exit code and identifies its location. The report counts every failed check and lists up to the first 100 discrepancies. Verification leaves existing experiment tables untouched.
+
+Financial and repayment outcomes are comparable as descriptive statistics between matching dissertation and current configurations. The simulator's random streams changed, so the same numerical seed identifies a trial in each run and does not pair identical individual applicants across run generations. Earlier parity values and mean-based feasibility labels use different definitions from current opportunity gaps and episode compliance, respectively.
 
 ## What fairness means
 
@@ -561,12 +585,13 @@ The Phase 1 hard wrapper uses parity tolerance **0.35**, Phase 2 uses **0.010**,
 | File | What one row or artifact represents |
 | --- | --- |
 | `episode_summaries.csv` | One policy with one seed, after its complete episode; Modes 1–3. |
-| `trajectories.csv` | One decision round for one policy and seed; follow change over time. Round indices begin at 0. |
-| `aggregate_results.csv` | Means and standard deviations across seeds for each policy; sweep aggregates also separate settings. |
+| `trajectories.csv` | One decision round for one policy and seed. `opportunity_pool` records the opening IDs, primary groups and costs. Selected rows also supply the Phase 1–2 funding ledger. Round indices begin at 0. |
+| `aggregate_results.csv` | Mean, sample standard deviation, standard error, minimum, maximum, valid episode count and 95% interval for each metric and policy. Sweep aggregates also separate settings. |
+| `paired_comparisons.csv` | Matched-seed differences between each existing fairness variant and its base policy, within one configuration. |
 | `ranked_results.csv` | Flattened aggregates, fairness checks, and rank; Modes 2–3. |
 | `funding_log.csv` | One issued loan, including its hidden evaluator outcome; Mode 3 and sweeps. |
 | `maturity_log.csv` | One matured loan and the cash it returned; Mode 3 and sweeps. |
-| `run_manifest.json` | Run settings, episode seeds, policy parameters, random-stream convention, simulation version, software versions and Git provenance. Sweep case settings are in the linked `config.json` files. |
+| `run_manifest.json` | Run settings, episode seeds, policy parameters, random-stream convention, simulation version, software versions, Git provenance, expected and actual episode counts, and completion status. Sweep case settings are in the linked `config.json` files. |
 | `report.html`, `winner_summary.txt` | Readable comparison; winner summary is written for Modes 2–3. Standalone Mode 1 uses the printed table, CSVs, and plots. |
 | `*.png` | Plots of metric means over rounds; sweep plots compare parameter values. Check the axis and metric name before comparing. |
 | Sweep `raw_results.csv` | One episode plus its sweep settings and diagnostic metrics; this is the sweep summary table. |
@@ -597,7 +622,7 @@ Main phase aggregate CSVs use multiple header rows to group `mean` and `std` und
 | `allocation_share_gap`, `feasible_dp_gap`, `population_dp_gap` | The explicitly named gaps. `demographic_parity_gap` is a compatibility alias for the Phase 1 allocation-share gap or the feasible gap in Phases 2–3. |
 | `feasible_dp_groups`, `population_dp_groups` | Number of groups with a positive denominator in each applicant parity comparison. |
 
-`mean` is the average of episode values. `std` is sample standard deviation across seeds, describing variation, not a confidence interval. A reported `349.9 ± 13.02` successful repayments is an average ± standard deviation; individual episodes have integer successes. For one seed the reporting code fills undefined aggregate standard deviation with zero. Ratios are calculated per episode and then averaged, so an average ratio need not equal a ratio of averages.
+`std` is the sample standard deviation across seeds and `se` is its standard error for the mean. They are undefined with fewer than two valid episodes. `ci95_low` and `ci95_high` use a Student’s t interval for means with at least two valid episodes and a Wilson score interval for proportions. Undefined statistics are blank. Small-sample intervals are estimates. Ratios are calculated per episode before averaging. Paired intervals are computed on the within-seed differences, using the number of pairs with both metric values. [NIST guidance on intervals for means](https://www.itl.nist.gov/div898/handbook/eda/section3/eda352.htm) and [for proportions](https://itl.nist.gov/div898/handbook/prc/section2/prc241.htm).
 
 ### Additional Phase 3 columns
 
@@ -653,6 +678,7 @@ Compare policies within the same phase and configuration. Phase 1 uses a differe
 | `--default-recovery` | 0.0 | Fraction of defaulted principal recovered at maturity. |
 | `--liquidity-reserve` | 0 | Cash held back from new Phase 3 lending. |
 | `--parity-tolerance` | 0.05 | Phase 3/sweep allowed funding-rate gap. |
+| `--verify` | Off | Mode 5 checks default runs, sweep results and the completed suite. |
 | `--quick-test` | Off | Modes 4/5: at most two sweep seeds and two values per sweep; also caps main-suite seeds in Mode 5. Does not reduce generated scenarios. |
 
 For custom Phase 1 data, save a JSON file such as `arms.json`:

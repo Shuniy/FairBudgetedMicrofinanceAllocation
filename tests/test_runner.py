@@ -63,7 +63,9 @@ def test_shared_runner_saves_mode_neutral_results(tmp_path) -> None:
     policies = {"random": build_arm_policy_factories(targets)["random"]}
     summaries, trajectories = compare_policies(factory, policies, targets, [0])
     aggregate = save_results(summaries, trajectories, tmp_path, "arm")
-    assert aggregate.loc["random", ("cumulative_reward", "std")] == 0.0
+    assert pd.isna(aggregate.loc["random", ("cumulative_reward", "std")])
+    assert pd.isna(aggregate.loc["random", ("cumulative_reward", "ci95_low")])
+    assert aggregate.loc["random", ("cumulative_reward", "n")] == 1
     for filename in (
         "episode_summaries.csv",
         "trajectories.csv",

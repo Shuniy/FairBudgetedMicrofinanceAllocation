@@ -5,7 +5,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from html import escape
-from math import ceil, floor, sqrt
+from math import ceil, floor
 from os.path import relpath
 from pathlib import Path
 
@@ -14,12 +14,14 @@ import numpy as np
 import pandas as pd
 
 from Data.feature_encoder import BorrowerFeatureEncoder
+from episode_statistics import describe
 from evaluate import (
     CONSTRAINT_RATE_FIELDS,
     FAIRNESS_COUNT_PREFIXES,
     REPORT_STYLE,
     CMDPPolicyFactory,
     compare_cmdp_policies,
+    episode_completion,
     reproducibility_metadata,
 )
 from metrics import QUOTA_NUMERICAL_TOLERANCE, total_quota_deficit
@@ -314,8 +316,11 @@ AGGREGATE_METRICS = (
 )
 
 
+SCREEN_METRICS = {"quota_feasible", "parity_feasible", "opportunity_screens_passed", "fairness_feasible"}
+
+
 def aggregate_sweep_results(raw_results: pd.DataFrame) -> pd.DataFrame:
-    """Return tidy seed aggregates with normal-approximation 95% intervals."""
+    """Return tidy seed aggregates with Student's t and Wilson 95% intervals."""
 
     group_columns = [
         "sweep_name",
@@ -341,28 +346,21 @@ def aggregate_sweep_results(raw_results: pd.DataFrame) -> pd.DataFrame:
             if field in frame:
                 identity[f"{field}_episodes"] = int(frame[field].sum())
         for metric, source in metrics.items():
-            values = pd.to_numeric(frame[source], errors="coerce")
+            values = pd.to_numeric(frame[source])
             if (
                 source in CONSTRAINT_RATE_FIELDS.values()
                 or source.startswith(FAIRNESS_COUNT_PREFIXES)
             ):
                 values = values.fillna(0)
-            values = values.dropna()
-            n_seeds = int(len(values))
-            mean = float(values.mean()) if n_seeds else np.nan
-            std = float(values.std(ddof=1)) if n_seeds > 1 else 0.0
-            margin = 1.96 * std / sqrt(n_seeds) if n_seeds else 0.0
-            records.append(
-                {
-                    **identity,
-                    "metric": metric,
-                    "metric_mean": mean,
-                    "metric_std": std,
-                    "metric_ci95_low": mean - margin,
-                    "metric_ci95_high": mean + margin,
-                    "n_seeds": n_seeds,
-                }
+            statistics = describe(
+                values, proportion=source in CONSTRAINT_RATE_FIELDS.values() or source in SCREEN_METRICS
             )
+            records.append({
+                **identity,
+                "metric": metric,
+                "n_seeds": statistics.pop("n"),
+                **{f"metric_{key}": value for key, value in statistics.items()},
+            })
     return pd.DataFrame(records)
 
 
@@ -886,6 +884,7 @@ def run_cmdp_sweep(
         "horizon": default_config.max_rounds,
         "quota_tolerance": quota_tolerance,
         "default_phase3_parameters": asdict(default_config),
+        **episode_completion(sum(len(case.policy_factories) for case in cases) * len(seeds), len(raw)),
         "protected_attributes_in_prediction": shared_encoder.include_protected_attributes,
         "timestamp_utc": datetime.now(timezone.utc).isoformat(),
         **reproducibility_metadata(),
@@ -1074,7 +1073,7 @@ def save_mode4_report(
             f"{escape(', '.join(f'{value:g}' for value in values))}</p>"
             f"<h3>Data-derived summary</h3><ul>{summary_items}</ul>"
             f"<h3>Aggregate results</h3><p class=\"note\">Values are seed "
-            "means with normal-approximation 95% confidence intervals. "
+            "means with 95% Student’s t intervals, or Wilson intervals for proportions. "
             "Constraint satisfaction rates use all episodes. The aggregate CSV "
             "records the number of episodes with evaluable parity for each "
             "denominator. Default marks the existing Phase 3 setting.</p>"
@@ -1103,6 +1102,11 @@ def save_mode4_report(
         ),
         "timestamp_utc": datetime.now(timezone.utc).isoformat(),
         "baseline_consistency": dict(baseline_consistency),
+        **episode_completion(
+            sum(json.loads((artifact.output / "config.json").read_text())["expected_episodes"]
+                for artifact in artifacts.values()),
+            sum(len(artifact.raw_results) for artifact in artifacts.values()),
+        ),
         **reproducibility_metadata(),
     }
     (output / "run_manifest.json").write_text(
@@ -1127,7 +1131,7 @@ figcaption {{ font-size: .85rem; color: #4b5563; text-align: center; }}
 <p class="winner">Baseline consistency check: {'passed' if baseline_consistency.get('all_passed') else 'failed'}.
 This check compares the budget default (multiplier 1.0) with the group-imbalance default (marginalized probability 0.20)
 and the fairness-strength default (strength 1.0) for matching policy and seed rows.
-Comparison with a standalone Mode 3 run is planned for Phase 4.</p>
+The saved-output verifier also compares matching standalone Mode 3 runs.</p>
 {''.join(sections)}
 <h2>Reproducibility manifest</h2><pre>{escape(json.dumps(manifest, indent=2, sort_keys=True, default=str))}</pre>
 </body></html>"""

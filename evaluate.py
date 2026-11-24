@@ -21,6 +21,7 @@ from Algorithms.contextual import TrueRewardContextualPolicy
 from Algorithms.true_repayment_cost import TrueRewardPerCostPolicy
 from Environments.base_environment import BanditEnvironment, BanditMode
 from Environments.cmdp_environment import StatefulMicrofinanceCMDPEnv
+from episode_statistics import CI_METHODS, describe, paired_comparisons
 from metrics import (
     allocation_share_gap,
     allocation_shares,
@@ -135,6 +136,17 @@ def _uses_true_probabilities(policy: BasePolicy | CMDPPolicy) -> bool:
     )
 
 
+def _opportunity_pool(env: BanditEnvironment | StatefulMicrofinanceCMDPEnv) -> str:
+    """Record the opening pool before any decision changes affordability."""
+    identifiers = (
+        (arm.name for arm in env.arms)
+        if isinstance(env, BanditEnvironment) and env.mode == BanditMode.ARM
+        else (candidate.borrower.id for candidate in env.current_pool)
+    )
+    pool = zip(identifiers, env.current_groups(), env.current_costs())
+    return json.dumps(list(pool), separators=(",", ":"))
+
+
 def run_episode(
     env: BanditEnvironment,
     policy: BasePolicy,
@@ -167,6 +179,7 @@ def run_episode(
         observed_count = len(feedback_at_round_start)
         row: dict[str, float | int | str | None] = {
             "round": round_index,
+            "opportunity_pool": _opportunity_pool(env),
             "selected_index": None,
             "identifier": None,
             "fairness_group": None,
@@ -357,20 +370,25 @@ def _aggregate_episode_metrics(
     data = summaries.copy()
     data[counts] = data[counts].fillna(0)
     grouped = data.groupby("policy")
-    aggregate = grouped[[*metrics, *counts]].agg(["mean", "std"])
-    std_columns = [column for column in aggregate.columns if column[1] == "std"]
-    aggregate.loc[:, std_columns] = aggregate.loc[:, std_columns].fillna(0.0)
-    if "parity_evaluable" in data:
-        episodes = grouped.size()
-        aggregate["episodes_evaluated", ""] = episodes
-        aggregate["parity_evaluable_episodes", ""] = grouped["parity_evaluable"].sum()
-        if "population_parity_evaluable" in data:
-            aggregate["population_parity_evaluable_episodes", ""] = (
-                grouped["population_parity_evaluable"].sum()
-            )
-        for rate, outcome in CONSTRAINT_RATE_FIELDS.items():
-            if outcome in data:
-                aggregate[rate, ""] = grouped[outcome].sum() / episodes
+    records = {}
+    for policy, frame in grouped:
+        fields = {}
+        for metric in dict.fromkeys([*metrics, *counts]):
+            fields.update({(metric, key): value for key, value in describe(frame[metric]).items()})
+        if "parity_evaluable" in frame:
+            fields["episodes_evaluated", ""] = len(frame)
+            for evaluable in ("parity_evaluable", "population_parity_evaluable"):
+                if evaluable in frame:
+                    fields[f"{evaluable}_episodes", ""] = int(frame[evaluable].sum())
+            for rate, outcome in CONSTRAINT_RATE_FIELDS.items():
+                if outcome in frame:
+                    fields.update({
+                        (rate, "" if key == "mean" else key): value
+                        for key, value in describe(frame[outcome].fillna(0), proportion=True).items()
+                    })
+        records[policy] = fields
+    aggregate = pd.DataFrame.from_dict(records, orient="index").rename_axis("policy")
+    aggregate.columns = pd.MultiIndex.from_tuples(aggregate.columns)
     return aggregate.sort_values(("cumulative_reward", "mean"), ascending=False)
 
 
@@ -417,6 +435,9 @@ def save_results(
     trajectories.to_csv(output / "trajectories.csv", index=False)
     aggregate = aggregate_results(summaries)
     aggregate.to_csv(output / "aggregate_results.csv")
+    paired_comparisons(summaries, mode, sorted(summaries["seed"].unique())).to_csv(
+        output / "paired_comparisons.csv", index=False
+    )
     for metric in (
         "cumulative_reward",
         "repayment_rate",
@@ -442,7 +463,8 @@ def display_results(
     label = f"{mode.title()} bandit" if mode in {"arm", "contextual"} else mode.upper()
     print(f"\n{label} aggregate results:\n")
     if ranked is None:
-        print(aggregate.round(5).to_string())
+        display = aggregate.loc[:, aggregate.columns.get_level_values(1).isin(["mean", "std"])]
+        print(display.round(5).to_string())
     else:
         print(format_ranked_table(ranked, mode))
         print(f"\n{winner_summary(ranked, mode)}")
@@ -491,6 +513,7 @@ def run_cmdp_episode(
                 feedback.principal,
             )
 
+        opportunity_pool = _opportunity_pool(env)
         funded_this_round = 0
         matured_this_round = len(matured_now)
         hidden_reward_this_round = 0.0
@@ -513,6 +536,7 @@ def run_cmdp_episode(
         rows.append(
             {
                 "round": env.round_index,
+                "opportunity_pool": opportunity_pool,
                 "funded_this_round": funded_this_round,
                 "matured_this_round": matured_this_round,
                 "hidden_reward_funded_this_round": hidden_reward_this_round,
@@ -741,6 +765,9 @@ def save_cmdp_results(
     maturity_log.to_csv(output / "maturity_log.csv", index=False)
     aggregate = aggregate_cmdp_results(summaries)
     aggregate.to_csv(output / "aggregate_results.csv")
+    paired_comparisons(summaries, "cmdp", sorted(summaries["seed"].unique())).to_csv(
+        output / "paired_comparisons.csv", index=False
+    )
     for metric in (
         "eventual_cumulative_reward",
         "available_capital",
@@ -924,12 +951,20 @@ def format_ranked_table(ranked: pd.DataFrame, mode: str) -> str:
 
 def _package_versions() -> dict[str, str]:
     versions = {"python": platform.python_version()}
-    for package in ("numpy", "pandas", "matplotlib"):
+    for package in ("numpy", "pandas", "matplotlib", "scipy"):
         try:
             versions[package] = version(package)
         except PackageNotFoundError:
             versions[package] = "not installed"
     return versions
+
+
+def episode_completion(expected: int, actual: int) -> dict[str, object]:
+    return {
+        "expected_episodes": expected,
+        "actual_episodes": actual,
+        "status": "complete" if actual == expected else "incomplete",
+    }
 
 
 def reproducibility_metadata() -> dict[str, object]:
@@ -949,6 +984,8 @@ def reproducibility_metadata() -> dict[str, object]:
     status = git_output("status", "--porcelain")
     return {
         "simulation_version": 2,
+        "audit_format": 1,
+        "confidence_intervals": CI_METHODS,
         "rng_convention": {
             "generator": "NumPy default_rng (PCG64)",
             "seed_derivation": "SeedSequence(episode seed), children 0, 1 and 2",
@@ -1069,6 +1106,11 @@ def save_evaluation_report(
     summary = winner_summary(ranked, mode)
     ranked.to_csv(output / "ranked_results.csv", index=False)
     (output / "winner_summary.txt").write_text(summary + "\n", encoding="utf-8")
+    episode_count = ("episodes_evaluated", "")
+    completion = (
+        episode_completion(len(seeds) * len(ranked), int(aggregate[episode_count].sum()))
+        if episode_count in aggregate else {}
+    )
     manifest = {
         "mode": mode,
         "seeds": list(seeds),
@@ -1080,6 +1122,7 @@ def save_evaluation_report(
         "configuration": dict(configuration),
         "policy_parameters": dict(policy_parameters),
         "policy_configurations": dict(policy_configurations or {}),
+        **completion,
         **reproducibility_metadata(),
     }
     (output / "run_manifest.json").write_text(

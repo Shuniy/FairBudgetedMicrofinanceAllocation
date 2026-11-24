@@ -340,3 +340,30 @@ def test_policies_run_directly_against_canonical_environment() -> None:
         seed=4,
     )
     assert contextual_result.summary["rounds"] == 2
+
+
+@pytest.mark.parametrize("wrapper", ["hard", "soft"])
+def test_inactive_fairness_wrapper_preserves_budgeted_ucb_episode(wrapper):
+    arms = [ArmSpec("A", "A", 0.7, 3, 0), ArmSpec("B", "B", 0.7, 3, 0)]
+    env = BanditEnvironment.for_arms(arms, EnvironmentConfig(60, 10))
+    base = run_episode(env, BudgetedUCBPolicy(2), {"A": 0.8}, seed=21)
+    wrapped_policy = (
+        HardFairPolicy(BudgetedUCBPolicy(2), {"A": 0}, parity_tolerance=1)
+        if wrapper == "hard"
+        else SoftFairPolicy(BudgetedUCBPolicy(2), {"A": 0.8}, penalty_lambda=0)
+    )
+    wrapped = run_episode(env, wrapped_policy, {"A": 0.8}, seed=21)
+    assert base.summary == wrapped.summary
+    assert base.trajectory.equals(wrapped.trajectory)
+
+
+def test_zero_contextual_penalty_preserves_stochastic_scores_and_tie_breaking():
+    env = BanditEnvironment.for_contextual(
+        ContextualEnvironmentConfig(total_budget=600_000, max_rounds=10, pool_size=8)
+    )
+    targets = {"women": 0.8}
+    base = ContextualEpsilonGreedyPolicy(env.n_features, epsilon=0.1, budget_aware=True)
+    unpenalized = run_episode(env, base, targets, seed=21)
+    wrapped = run_episode(env, SoftFairPolicy(base, targets, penalty_lambda=0), targets, seed=21)
+    assert unpenalized.summary == wrapped.summary
+    assert unpenalized.trajectory.equals(wrapped.trajectory)

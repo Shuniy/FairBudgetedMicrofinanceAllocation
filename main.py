@@ -48,6 +48,7 @@ from evaluate import (
     compare_cmdp_policies,
     compare_policies,
     display_results,
+    episode_completion,
     flatten_aggregate,
     rank_results,
     reproducibility_metadata,
@@ -442,6 +443,10 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
             "Modes 4/5: use two seeds and two values for each robustness sweep"
         ),
     )
+    parser.add_argument(
+        "--verify", action="store_true",
+        help="Mode 5: independently verify saved results after each stage",
+    )
     args = parser.parse_args(argv)
     if args.seeds <= 0:
         parser.error("--seeds must be positive")
@@ -472,6 +477,8 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         parser.error("--parity-tolerance must be in [0, 1]")
     if args.quick_test and normalized_mode not in {None, "sweeps", "all"}:
         parser.error("--quick-test is only valid for Modes 4 and 5")
+    if args.verify and normalized_mode not in {None, "all"}:
+        parser.error("--verify is only valid for Mode 5")
     return args
 
 
@@ -521,6 +528,7 @@ def run_arm(
             "quota_tolerance": QUOTA_TOLERANCE,
         },
         "policy_configurations": summaries.attrs["policy_configurations"],
+        **episode_completion(len(seeds) * len(policies), len(summaries)),
         **reproducibility_metadata(),
     }
     (destination / "run_manifest.json").write_text(
@@ -676,7 +684,7 @@ def combine_aggregate_results(
         )
         flattened.insert(0, "mode", mode)
         frames.append(flattened)
-    combined = pd.concat(frames, ignore_index=True, sort=False)
+    combined = pd.concat(frames, ignore_index=True, sort=False).copy()
     if "cumulative_reward_mean" in combined:
         combined["rank_within_mode"] = combined.groupby("mode")[
             "cumulative_reward_mean"
@@ -733,7 +741,11 @@ def run_all(args: argparse.Namespace):
             QUOTA_TOLERANCE,
         ),
     }
+    if args.verify:
+        verify_suite_stage(output, "verification_defaults.json")
     run_cmdp_sweeps(suite_args, output / "cmdp_robustness")
+    if args.verify:
+        verify_suite_stage(output, "verification_robustness.json")
     suite_manifest = {
         "mode": 5,
         "name": "complete_experiment_suite",
@@ -754,12 +766,9 @@ def run_all(args: argparse.Namespace):
             "mode_4": "cmdp_robustness",
             "combined_aggregates": "combined_aggregate_results.csv",
             "combined_report": "report.html",
+            "cross_configuration": "all_scenarios",
         },
     }
-    (output / "run_manifest.json").write_text(
-        json.dumps(suite_manifest, indent=2, sort_keys=True, default=str) + "\n",
-        encoding="utf-8",
-    )
     save_combined_report(
         ranked_results,
         output,
@@ -772,7 +781,37 @@ def run_all(args: argparse.Namespace):
     print(f"\nSaved combined results to: {output.resolve()}")
     # Run cross-configuration validation beneath the selected suite output.
     run_all_scenarios(output / "all_scenarios")
+    directories = [output, *(output / "all_scenarios" / name for name in SCENARIOS)]
+    children = [
+        json.loads(path.read_text())
+        for directory in directories
+        for label in ("arm", "contextual", "cmdp", "cmdp_robustness")
+        if (path := directory / label / "run_manifest.json").is_file()
+    ]
+    suite_manifest.update(episode_completion(
+        sum(child["expected_episodes"] for child in children),
+        sum(child["actual_episodes"] for child in children),
+    ))
+    if len(children) != 4 * len(directories) or any(child["status"] != "complete" for child in children):
+        suite_manifest["status"] = "incomplete"
+    suite_manifest["scenarios"] = SCENARIOS
+    (output / "run_manifest.json").write_text(
+        json.dumps(suite_manifest, indent=2, sort_keys=True, default=str) + "\n",
+        encoding="utf-8",
+    )
+    if args.verify:
+        verify_suite_stage(output, "verification_summary.json")
     return combined
+
+
+def verify_suite_stage(output: Path, filename: str) -> None:
+    from verify_results import audit_outputs
+
+    report = audit_outputs(output, summary_path=output / filename)
+    print(f"Verified {report['episodes_checked']} episodes. {report['failed_checks']} failed checks.")
+    if report["failed_checks"]:
+        raise RuntimeError(f"Saved-output verification failed. See {output / filename}.")
+
 
 
 def _only_cmdp_fairness_family(
