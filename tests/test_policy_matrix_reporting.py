@@ -189,6 +189,8 @@ def aggregate_fixture(rows: list[dict[str, float | str]]) -> pd.DataFrame:
         for metric in metrics:
             record[(metric, "mean")] = row.get(metric, 0.0)
             record[(metric, "std")] = 0.0
+        if "constraint_satisfaction_rate" in row:
+            record[("constraint_satisfaction_rate", "")] = row["constraint_satisfaction_rate"]
         records.append(record)
     frame = pd.DataFrame(records)
     frame.columns = pd.MultiIndex.from_tuples(frame.columns)
@@ -205,6 +207,7 @@ def test_ranking_prefers_feasible_utility_and_has_deterministic_ties() -> None:
                 "repayment_rate": 0.8,
                 "demographic_parity_gap": 0.04,
                 "total_quota_deficit": 0.01,
+                "constraint_satisfaction_rate": 1.0,
             },
             {
                 "policy": "alpha",
@@ -213,6 +216,7 @@ def test_ranking_prefers_feasible_utility_and_has_deterministic_ties() -> None:
                 "repayment_rate": 0.8,
                 "demographic_parity_gap": 0.04,
                 "total_quota_deficit": 0.01,
+                "constraint_satisfaction_rate": 1.0,
             },
             {
                 "policy": "high_utility_infeasible",
@@ -221,6 +225,7 @@ def test_ranking_prefers_feasible_utility_and_has_deterministic_ties() -> None:
                 "repayment_rate": 0.9,
                 "demographic_parity_gap": 0.30,
                 "total_quota_deficit": 0.20,
+                "constraint_satisfaction_rate": 0.0,
             },
         ]
     )
@@ -230,7 +235,7 @@ def test_ranking_prefers_feasible_utility_and_has_deterministic_ties() -> None:
     assert ranked.iloc[-1]["policy"] == "high_utility_infeasible"
 
 
-def test_ranking_fallback_reports_best_compromise() -> None:
+def test_ranking_fallback_reports_mean_based_order_for_older_aggregates() -> None:
     aggregate = aggregate_fixture(
         [
             {
@@ -253,7 +258,8 @@ def test_ranking_fallback_reports_best_compromise() -> None:
     )
     ranked = rank_results(aggregate, parity_tolerance=0.05)
     assert ranked.iloc[0]["policy"] == "less_violation"
-    assert "best compromise" in winner_summary(ranked, "contextual")
+    assert pd.isna(ranked.iloc[0]["fairness_feasible"])
+    assert "Episode compliance is unavailable" in winner_summary(ranked, "contextual")
 
 
 def test_reports_include_grid_manifest_html_and_combined_links(tmp_path) -> None:

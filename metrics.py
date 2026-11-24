@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
+from math import nan
 
 import numpy as np
+
+QUOTA_NUMERICAL_TOLERANCE = 1e-12
 
 
 def allocation_shares(group_counts: Mapping[str, int]) -> dict[str, float]:
@@ -19,31 +22,29 @@ def group_funding_rates(
     funded: Mapping[str, int],
     opportunities: Mapping[str, int],
 ) -> dict[str, float]:
-    """Computes the funding rates for each group as the fraction of funded counts over opportunity counts.
-    If a group has no opportunities, its funding rate is considered to be 0.0."""
-    groups = set(funded) | set(opportunities)
+    """Compute funded / opportunities for groups with positive opportunities."""
     return {
-        group: (
-            funded.get(group, 0) / opportunities[group]
-            if opportunities.get(group, 0) > 0
-            else 0.0
-        )
-        for group in groups
+        group: funded.get(group, 0) / count
+        for group, count in opportunities.items()
+        if count > 0
     }
+
+
+def allocation_share_gap(funded: Mapping[str, int]) -> float:
+    """Compute the spread of allocation shares across all supplied groups."""
+    shares = allocation_shares(funded)
+    return max(shares.values()) - min(shares.values()) if shares else 0.0
 
 
 def demographic_parity_gap(
     funded: Mapping[str, int],
     opportunities: Mapping[str, int] | None = None,
 ) -> float:
-    """Important metric to check. Computes the demographic parity gap as the difference between the maximum and minimum allocation shares or funding rates across groups.
-    If opportunities are provided, the funding rates are used; otherwise, allocation shares are used."""
-    rates = (
-        allocation_shares(funded)
-        if opportunities is None
-        else group_funding_rates(funded, opportunities)
-    )
-    return float(max(rates.values()) - min(rates.values())) if rates else 0.0
+    """Compute the funding-rate spread, undefined with fewer than two rates."""
+    if opportunities is None:
+        return allocation_share_gap(funded)  # Legacy allocation-share call.
+    rates = group_funding_rates(funded, opportunities)
+    return max(rates.values()) - min(rates.values()) if len(rates) >= 2 else nan
 
 
 def quota_deficits(
@@ -63,12 +64,15 @@ def quota_satisfaction_rate(
     funded: Mapping[str, int],
     target_shares: Mapping[str, float],
 ) -> float:
-    """Important factor to check. Computes the quota satisfaction rate as the fraction of groups whose allocation shares meet or exceed their target shares.
-    If there are no target shares, returns 1.0."""
-    if not target_shares:
+    """Return the fraction of positive quotas met within numerical tolerance."""
+    deficits = [
+        deficit
+        for group, deficit in quota_deficits(funded, target_shares).items()
+        if target_shares[group] > 0
+    ]
+    if not deficits:
         return 1.0
-    deficits = quota_deficits(funded, target_shares)
-    return sum(value <= 1e-12 for value in deficits.values()) / len(deficits)
+    return sum(value <= QUOTA_NUMERICAL_TOLERANCE for value in deficits) / len(deficits)
 
 
 def budget_utilization(initial_budget: float, remaining_budget: float) -> float:
@@ -105,9 +109,10 @@ def parity_violation(
     opportunities: Mapping[str, int],
     tolerance: float,
 ) -> float:
-    """Return the amount by which the opportunity-based parity gap exceeds a limit."""
+    """Return positive parity excess, with no penalty for an undefined gap."""
 
-    return max(0.0, demographic_parity_gap(funded, opportunities) - tolerance)
+    gap = demographic_parity_gap(funded, opportunities)
+    return gap - tolerance if gap > tolerance else 0.0
 
 
 def reward_per_disbursed_capital(

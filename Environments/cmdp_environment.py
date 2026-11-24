@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections import defaultdict, deque
-from collections.abc import Mapping, Sequence
+from collections.abc import Mapping
 from typing import Any
 
 import numpy as np
@@ -13,7 +13,6 @@ from metrics import (
     group_funding_rates,
     quota_deficits,
 )
-from models.borrower_candidate import BorrowerCandidate
 from models.environment_config import CMDPEnvironmentConfig
 from models.events import (
     FundingResult,
@@ -92,6 +91,7 @@ class StatefulMicrofinanceCMDPEnv:
         self.maturity_history: list[dict[str, Any]] = []
         self.group_funding_counts: dict[str, int] = defaultdict(int)
         self.group_opportunity_counts: dict[str, int] = defaultdict(int)
+        self.group_population_opportunity_counts: dict[str, int] = defaultdict(int)
         self.recent_outcomes: deque[float] = deque(maxlen=30)
         self.observed_repayments = 0
         self.observed_defaults = 0
@@ -99,24 +99,21 @@ class StatefulMicrofinanceCMDPEnv:
         self.cumulative_recycled = 0.0
         self.cumulative_default_loss = 0.0
         self.current_pool = self.generator.generate_pool(self.config.pool_size)
-        self._record_pool_opportunities(self.current_pool)
+        self._record_pool_opportunities()
         self._matured_at_round_start: tuple[MaturedLoanFeedback, ...] = tuple()
         self._done = False
         self._refresh_done_flag()
         return self.observation()
 
-    def _record_pool_opportunities(
-        self, pool: Sequence[BorrowerCandidate]
-    ) -> None:
-        """Record candidates that are genuinely affordable at pool arrival."""
-
-        spendable = self.available_capital - self.config.minimum_liquidity_reserve
-        for candidate in pool:
-            if candidate.cost <= spendable + 1e-12:
-                group = candidate.fairness_group
-                self.group_funding_counts.setdefault(group, 0)
-                self.group_opportunity_counts.setdefault(group, 0)
-                self.group_opportunity_counts[group] += 1
+    def _record_pool_opportunities(self) -> None:
+        """Count each arrival once and measure affordability before the batch."""
+        groups = self.current_groups()
+        for group in groups:
+            self.group_population_opportunity_counts[group] += 1
+        for index in self.feasible_actions():
+            group = groups[index]
+            self.group_funding_counts.setdefault(group, 0)
+            self.group_opportunity_counts[group] += 1
 
     def base_context_matrix(self) -> np.ndarray:
         if not self.current_pool:
@@ -204,7 +201,7 @@ class StatefulMicrofinanceCMDPEnv:
         return {
             "quota_violation": float(sum(deficits.values())),
             "parity_gap": gap,
-            "parity_violation": max(0.0, gap - parity_tolerance),
+            "parity_violation": gap - parity_tolerance if gap > parity_tolerance else 0.0,
         }
 
     def state_bucket(
@@ -220,7 +217,7 @@ class StatefulMicrofinanceCMDPEnv:
             self.group_funding_counts,
             self.group_opportunity_counts,
         )
-        fairness_bucket = (
+        fairness_bucket = "NA" if np.isnan(gap) else (
             0
             if gap <= parity_tolerance
             else (1 if gap <= 2 * parity_tolerance else 2)
@@ -253,6 +250,9 @@ class StatefulMicrofinanceCMDPEnv:
             "feasible_actions": self.feasible_actions(),
             "group_funding_counts": dict(self.group_funding_counts),
             "group_opportunity_counts": dict(self.group_opportunity_counts),
+            "group_population_opportunity_counts": dict(
+                self.group_population_opportunity_counts
+            ),
         }
 
     def fund(self, action: int, learning_context: np.ndarray) -> FundingResult:
@@ -377,7 +377,7 @@ class StatefulMicrofinanceCMDPEnv:
         matured = self._release_due_loans()
         if self.round_index < self.config.max_rounds:
             self.current_pool = self.generator.generate_pool(self.config.pool_size)
-            self._record_pool_opportunities(self.current_pool)
+            self._record_pool_opportunities()
         else:
             self.current_pool = []
         self._matured_at_round_start = matured

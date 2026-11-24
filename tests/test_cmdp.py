@@ -230,6 +230,20 @@ def test_lagrangian_updates_use_signed_excess_and_project_both_bounds():
     assert policy.lambda_history[-1] == pytest.approx((0.0, 0.0))
 
 
+def test_lagrangian_uses_no_parity_signal_with_only_one_valid_group():
+    env = portfolio_state()
+    env.group_funding_counts.update(A=1)
+    env.group_opportunity_counts.update(A=2, B=0)
+    config = LagrangianConfig(target_shares={"B": 0.30}, warmup_rounds=0)
+    policy = LagrangianFairCMDPPolicy(PortfolioAwareLinUCBPolicy(1), config)
+
+    projected = env.projected_fairness(0, config.target_shares, config.parity_tolerance)
+    assert np.isnan(projected["parity_gap"])
+    assert projected["parity_violation"] == 0
+    policy.on_round_end(env)
+    assert policy.lambda_history[-1] == pytest.approx((0.258, 0.20))
+
+
 def test_cmdp_episode_never_overspends_liquid_capital() -> None:
     encoder = BorrowerFeatureEncoder(include_protected_attributes=False)
     config = cmdp_config(

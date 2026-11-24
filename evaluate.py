@@ -14,9 +14,10 @@ import pandas as pd
 
 from Algorithms.bandit import BasePolicy
 from Algorithms.cmdp import CMDPPolicy, LagrangianFairCMDPPolicy
-from Environments.base_environment import BanditEnvironment
+from Environments.base_environment import BanditEnvironment, BanditMode
 from Environments.cmdp_environment import StatefulMicrofinanceCMDPEnv
 from metrics import (
+    allocation_share_gap,
     allocation_shares,
     budget_utilization,
     capital_survival_ratio,
@@ -29,9 +30,90 @@ from metrics import (
     repayment_rate,
     reward_per_disbursed_capital,
     reward_per_unit_cost,
-    total_quota_deficit,
 )
 from models.environment_config import CMDPEnvironmentConfig
+
+
+ARM_PARITY_TOLERANCE = 0.35
+CONTEXTUAL_PARITY_TOLERANCE = 0.010
+QUOTA_TOLERANCE = 0.01
+
+
+def episode_constraint_outcomes(
+    parity_gap: float,
+    total_deficit: float,
+    parity_tolerance: float,
+    quota_tolerance: float,
+) -> dict[str, float | bool]:
+    """Evaluate one episode or trajectory snapshot against its thresholds."""
+    evaluable = not np.isnan(parity_gap)
+    quota_satisfied = total_deficit <= quota_tolerance
+    parity_satisfied = parity_gap <= parity_tolerance
+    return {
+        "parity_evaluable": evaluable,
+        "parity_satisfied": int(parity_satisfied) if evaluable else np.nan,
+        "quota_satisfied": quota_satisfied,
+        "constraint_satisfied": int(parity_satisfied and quota_satisfied) if evaluable else np.nan,
+    }
+
+
+def _fairness_metrics(
+    funded: Mapping[str, int],
+    opportunities: Mapping[str, int],
+    population: Mapping[str, int] | None,
+    targets: Mapping[str, float],
+    parity_tolerance: float,
+    quota_tolerance: float,
+) -> dict[str, float | int]:
+    """Build the fairness columns shared by trajectory rows and episode summaries."""
+    shares = allocation_shares(funded)
+    rates = group_funding_rates(funded, opportunities)
+    deficits = quota_deficits(funded, targets)
+    total_deficit = float(sum(deficits.values()))
+    fields = {
+        "quota_satisfaction_rate": quota_satisfaction_rate(funded, targets),
+        "total_quota_deficit": total_deficit,
+    }
+    groups = set(funded) | set(opportunities) | set(targets)
+    if population is None:
+        gap = allocation_share_gap(funded)
+        fields["allocation_share_gap"] = gap
+        constraint_gap = gap if sum(funded.values()) else np.nan
+    else:
+        gap = demographic_parity_gap(funded, opportunities)
+        constraint_gap = gap
+        population_rates = group_funding_rates(funded, population)
+        population_gap = demographic_parity_gap(funded, population)
+        population_outcomes = episode_constraint_outcomes(
+            population_gap, total_deficit, parity_tolerance, quota_tolerance
+        )
+        fields.update({
+            "feasible_dp_gap": gap,
+            "feasible_dp_groups": len(rates),
+            "population_dp_gap": population_gap,
+            "population_dp_groups": len(population_rates),
+            **{
+                f"population_{name}": value
+                for name, value in population_outcomes.items()
+                if name != "quota_satisfied"
+            },
+        })
+        groups.update(population)
+        for group in sorted(groups):
+            fields[f"population_opportunities_{group}"] = population.get(group, 0)
+            fields[f"population_funding_rate_{group}"] = population_rates.get(group, np.nan)
+
+    fields["demographic_parity_gap"] = gap
+    fields.update(episode_constraint_outcomes(
+        constraint_gap, total_deficit, parity_tolerance, quota_tolerance
+    ))
+    for group in sorted(groups):
+        fields[f"funded_{group}"] = funded.get(group, 0)
+        fields[f"opportunities_{group}"] = opportunities.get(group, 0)
+        fields[f"allocation_share_{group}"] = shares.get(group, 0.0)
+        fields[f"funding_rate_{group}"] = rates.get(group, 0.0 if population is None else np.nan)
+        fields[f"quota_deficit_{group}"] = deficits.get(group, 0.0)
+    return fields
 
 
 @dataclass(frozen=True, slots=True)
@@ -46,9 +128,15 @@ def run_episode(
     policy: BasePolicy,
     target_shares: Mapping[str, float] | None = None,
     seed: int | None = None,
+    *,
+    parity_tolerance: float | None = None,
+    quota_tolerance: float = QUOTA_TOLERANCE,
 ) -> EpisodeResult:
     """Run a single episode of the environment with the given policy and return the summary and trajectory."""
     targets = dict(target_shares or {})
+    arm_mode = env.mode == BanditMode.ARM
+    if parity_tolerance is None:
+        parity_tolerance = ARM_PARITY_TOLERANCE if arm_mode else CONTEXTUAL_PARITY_TOLERANCE
     env.reset(seed)
     policy.seed = env.config.seed if seed is None else seed
     policy.reset()
@@ -63,11 +151,6 @@ def run_episode(
             policy.update(feedback)
         cumulative_reward += result.reward
         cumulative_cost += result.cost
-        shares = allocation_shares(result.funding_counts)
-        rates = group_funding_rates(
-            result.funding_counts, result.opportunity_counts
-        )
-        deficits = quota_deficits(result.funding_counts, targets)
         decisions = result.round_index + 1
         row: dict[str, float | int | str] = {
             "round": result.round_index,
@@ -86,13 +169,14 @@ def run_episode(
                 cumulative_reward / cumulative_cost if cumulative_cost else 0.0
             ),
             "repayment_rate": cumulative_reward / decisions,
-            "demographic_parity_gap": demographic_parity_gap(
-                result.funding_counts, result.opportunity_counts
+            **_fairness_metrics(
+                result.funding_counts,
+                result.opportunity_counts,
+                None if arm_mode else result.population_opportunity_counts,
+                targets,
+                parity_tolerance,
+                quota_tolerance,
             ),
-            "quota_satisfaction_rate": quota_satisfaction_rate(
-                result.funding_counts, targets
-            ),
-            "total_quota_deficit": float(sum(deficits.values())),
             "observed_feedback_count": len(result.observed_feedback),
         }
         if result.true_repayment_probability is not None:
@@ -100,12 +184,6 @@ def run_episode(
         for key, value in result.metadata.items():
             if isinstance(value, (str, int, float)):
                 row[key] = value
-        for group in sorted(set(result.opportunity_counts) | set(targets)):
-            row[f"funded_{group}"] = result.funding_counts.get(group, 0)
-            row[f"opportunities_{group}"] = result.opportunity_counts.get(group, 0)
-            row[f"allocation_share_{group}"] = shares.get(group, 0.0)
-            row[f"funding_rate_{group}"] = rates.get(group, 0.0)
-            row[f"quota_deficit_{group}"] = deficits.get(group, 0.0)
         rows.append(row)
 
     trajectory = pd.DataFrame(rows)
@@ -113,10 +191,6 @@ def run_episode(
         trajectory["reward"].to_numpy() if not trajectory.empty else np.array([])
     )
     costs = trajectory["cost"].to_numpy() if not trajectory.empty else np.array([])
-    final_shares = allocation_shares(env.group_funding_counts)
-    final_rates = group_funding_rates(
-        env.group_funding_counts, env.group_opportunity_counts
-    )
     summary: dict[str, float | int | str] = {
         "rounds": env.total_allocations,
         "cumulative_reward": float(np.sum(rewards)),
@@ -126,22 +200,16 @@ def run_episode(
         "budget_utilization": budget_utilization(
             env.config.total_budget, env.remaining_budget
         ),
-        "demographic_parity_gap": demographic_parity_gap(
-            env.group_funding_counts, env.group_opportunity_counts
-        ),
-        "quota_satisfaction_rate": quota_satisfaction_rate(
-            env.group_funding_counts, targets
-        ),
-        "total_quota_deficit": total_quota_deficit(
-            env.group_funding_counts, targets
+        **_fairness_metrics(
+            env.group_funding_counts,
+            env.group_opportunity_counts,
+            None if arm_mode else env.group_population_opportunity_counts,
+            targets,
+            parity_tolerance,
+            quota_tolerance,
         ),
         "pending_feedback": len(getattr(env, "pending_feedback", [])),
     }
-    for group in sorted(env.group_opportunity_counts):
-        summary[f"funded_{group}"] = env.group_funding_counts.get(group, 0)
-        summary[f"opportunities_{group}"] = env.group_opportunity_counts.get(group, 0)
-        summary[f"allocation_share_{group}"] = final_shares.get(group, 0.0)
-        summary[f"funding_rate_{group}"] = final_rates.get(group, 0.0)
     return EpisodeResult(summary=summary, trajectory=trajectory)
 
 
@@ -154,6 +222,9 @@ def compare_policies(
     policy_factories: Mapping[str, PolicyFactory],
     target_shares: Mapping[str, float],
     seeds: Sequence[int],
+    *,
+    parity_tolerance: float | None = None,
+    quota_tolerance: float = QUOTA_TOLERANCE,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     """Run episodes for each policy and seed, collecting summaries and trajectories."""
     summaries: list[dict[str, float | int | str]] = []
@@ -162,7 +233,10 @@ def compare_policies(
         for seed in seeds:
             env = environment_factory(seed)
             policy = factory(env, seed)
-            episode = run_episode(env, policy, target_shares, seed)
+            episode = run_episode(
+                env, policy, target_shares, seed,
+                parity_tolerance=parity_tolerance, quota_tolerance=quota_tolerance,
+            )
             summary = dict(episode.summary)
             summary.update({"policy": policy_name, "seed": seed})
             summaries.append(summary)
@@ -173,26 +247,65 @@ def compare_policies(
     return pd.DataFrame(summaries), pd.concat(trajectories, ignore_index=True)
 
 
-# need to check, these metrics and whether they are reliable or need to add more metrics to evaluate the performance of the policies. The current metrics are:
+FAIRNESS_METRICS = (
+    "demographic_parity_gap",
+    "allocation_share_gap",
+    "feasible_dp_gap",
+    "population_dp_gap",
+    "feasible_dp_groups",
+    "population_dp_groups",
+    "quota_satisfaction_rate",
+    "total_quota_deficit",
+)
+
+CONSTRAINT_RATE_FIELDS = {
+    "parity_satisfaction_rate": "parity_satisfied",
+    "quota_constraint_satisfaction_rate": "quota_satisfied",
+    "constraint_satisfaction_rate": "constraint_satisfied",
+    "population_parity_satisfaction_rate": "population_parity_satisfied",
+    "population_constraint_satisfaction_rate": "population_constraint_satisfied",
+}
+
+FAIRNESS_COUNT_PREFIXES = ("funded_", "opportunities_", "population_opportunities_")
+
 COMMON_METRICS = (
     "cumulative_reward",
     "cumulative_cost",
     "reward_per_cost",
     "repayment_rate",
     "budget_utilization",
-    "demographic_parity_gap",
-    "quota_satisfaction_rate",
-    "total_quota_deficit",
+    *FAIRNESS_METRICS,
 )
+
+
+def _aggregate_episode_metrics(
+    summaries: pd.DataFrame, metrics: Sequence[str],
+) -> pd.DataFrame:
+    metrics = [metric for metric in metrics if metric in summaries]
+    counts = [column for column in summaries if column.startswith(FAIRNESS_COUNT_PREFIXES)]
+    data = summaries.copy()
+    data[counts] = data[counts].fillna(0)
+    grouped = data.groupby("policy")
+    aggregate = grouped[[*metrics, *counts]].agg(["mean", "std"])
+    std_columns = [column for column in aggregate.columns if column[1] == "std"]
+    aggregate.loc[:, std_columns] = aggregate.loc[:, std_columns].fillna(0.0)
+    if "parity_evaluable" in data:
+        episodes = grouped.size()
+        aggregate["episodes_evaluated", ""] = episodes
+        aggregate["parity_evaluable_episodes", ""] = grouped["parity_evaluable"].sum()
+        if "population_parity_evaluable" in data:
+            aggregate["population_parity_evaluable_episodes", ""] = (
+                grouped["population_parity_evaluable"].sum()
+            )
+        for rate, outcome in CONSTRAINT_RATE_FIELDS.items():
+            if outcome in data:
+                aggregate[rate, ""] = grouped[outcome].sum() / episodes
+    return aggregate.sort_values(("cumulative_reward", "mean"), ascending=False)
 
 
 def aggregate_results(summaries: pd.DataFrame) -> pd.DataFrame:
     """Aggregate the results by policy, computing the mean and standard deviation for each common metric."""
-    metrics = [metric for metric in COMMON_METRICS if metric in summaries]
-    aggregate = summaries.groupby("policy")[metrics].agg(["mean", "std"])
-    std_columns = [column for column in aggregate.columns if column[1] == "std"]
-    aggregate.loc[:, std_columns] = aggregate.loc[:, std_columns].fillna(0.0)
-    return aggregate.sort_values(("cumulative_reward", "mean"), ascending=False)
+    return _aggregate_episode_metrics(summaries, COMMON_METRICS)
 
 
 def plot_metric_over_time(
@@ -236,7 +349,8 @@ def save_results(
     for metric in (
         "cumulative_reward",
         "repayment_rate",
-        "demographic_parity_gap",
+        "allocation_share_gap" if mode == "arm" else "feasible_dp_gap",
+        "population_dp_gap",
         "quota_satisfaction_rate",
     ):
         if metric in trajectories:
@@ -286,6 +400,8 @@ def run_cmdp_episode(
     target_shares: Mapping[str, float],
     parity_tolerance: float,
     seed: int,
+    *,
+    quota_tolerance: float = QUOTA_TOLERANCE,
 ) -> CMDPEpisodeResult:
     """Run one stateful Phase 3 lending episode."""
 
@@ -316,7 +432,6 @@ def run_cmdp_episode(
             hidden_reward_this_round += result.hidden_reward
             disbursed_this_round += result.principal
 
-        fairness = env.fairness_snapshot(target_shares)
         lambda_quota, lambda_parity = _policy_lambdas(policy)
         rows.append(
             {
@@ -350,13 +465,13 @@ def run_cmdp_episode(
                     env.capital_at_risk,
                     env.config.initial_capital,
                 ),
-                "demographic_parity_gap": fairness[
-                    "demographic_parity_gap"
-                ],
-                "total_quota_deficit": fairness["total_quota_deficit"],
-                "quota_satisfaction_rate": quota_satisfaction_rate(
+                **_fairness_metrics(
                     env.group_funding_counts,
+                    env.group_opportunity_counts,
+                    env.group_population_opportunity_counts,
                     target_shares,
+                    parity_tolerance,
+                    quota_tolerance,
                 ),
                 "lambda_quota": lambda_quota,
                 "lambda_parity": lambda_parity,
@@ -380,15 +495,6 @@ def run_cmdp_episode(
     )
     eventual_terminal_capital = (
         env.available_capital + env.eventual_pending_capital_return()
-    )
-    final_rates = group_funding_rates(
-        env.group_funding_counts,
-        env.group_opportunity_counts,
-    )
-    final_shares = allocation_shares(env.group_funding_counts)
-    final_deficits = quota_deficits(
-        env.group_funding_counts,
-        target_shares,
     )
     lambda_quota, lambda_parity = _policy_lambdas(policy)
 
@@ -417,30 +523,18 @@ def run_cmdp_episode(
             env.capital_at_risk,
             env.config.initial_capital,
         ),
-        "demographic_parity_gap": demographic_parity_gap(
+        **_fairness_metrics(
             env.group_funding_counts,
             env.group_opportunity_counts,
-        ),
-        "quota_satisfaction_rate": quota_satisfaction_rate(
-            env.group_funding_counts,
+            env.group_population_opportunity_counts,
             target_shares,
-        ),
-        "total_quota_deficit": total_quota_deficit(
-            env.group_funding_counts,
-            target_shares,
+            parity_tolerance,
+            quota_tolerance,
         ),
         "pending_loans": len(env.pending_loans),
         "lambda_quota_final": lambda_quota,
         "lambda_parity_final": lambda_parity,
     }
-    for group in sorted(env.group_opportunity_counts):
-        summary[f"funded_{group}"] = env.group_funding_counts.get(group, 0)
-        summary[f"opportunities_{group}"] = env.group_opportunity_counts.get(
-            group, 0
-        )
-        summary[f"allocation_share_{group}"] = final_shares.get(group, 0.0)
-        summary[f"funding_rate_{group}"] = final_rates.get(group, 0.0)
-        summary[f"quota_deficit_{group}"] = final_deficits.get(group, 0.0)
 
     return CMDPEpisodeResult(
         summary=summary,
@@ -460,6 +554,8 @@ def compare_cmdp_policies(
     parity_tolerance: float,
     seeds: Sequence[int],
     encoder: "BorrowerFeatureEncoder | None" = None,
+    *,
+    quota_tolerance: float = QUOTA_TOLERANCE,
 ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     """Evaluate all Phase 3 policies using the shared borrower representation."""
 
@@ -484,6 +580,7 @@ def compare_cmdp_policies(
                 target_shares,
                 parity_tolerance,
                 seed,
+                quota_tolerance=quota_tolerance,
             )
             summary = dict(episode.summary)
             summary.update({"policy": policy_name, "seed": seed})
@@ -527,23 +624,14 @@ CMDP_METRICS = (
     "final_capital_at_risk",
     "eventual_terminal_capital",
     "capital_survival_ratio",
-    "demographic_parity_gap",
-    "quota_satisfaction_rate",
-    "total_quota_deficit",
+    *FAIRNESS_METRICS,
     "lambda_quota_final",
     "lambda_parity_final",
 )
 
 
 def aggregate_cmdp_results(summaries: pd.DataFrame) -> pd.DataFrame:
-    metrics = [metric for metric in CMDP_METRICS if metric in summaries]
-    aggregate = summaries.groupby("policy")[metrics].agg(["mean", "std"])
-    std_columns = [column for column in aggregate.columns if column[1] == "std"]
-    aggregate.loc[:, std_columns] = aggregate.loc[:, std_columns].fillna(0.0)
-    return aggregate.sort_values(
-        ("cumulative_reward", "mean"),
-        ascending=False,
-    )
+    return _aggregate_episode_metrics(summaries, CMDP_METRICS)
 
 
 def save_cmdp_results(
@@ -567,7 +655,8 @@ def save_cmdp_results(
         "available_capital",
         "capital_at_risk",
         "capital_turnover",
-        "demographic_parity_gap",
+        "feasible_dp_gap",
+        "population_dp_gap",
         "quota_satisfaction_rate",
         "lambda_quota",
         "lambda_parity",
@@ -582,11 +671,14 @@ def save_cmdp_results(
     return aggregate
 
 
-def _flatten_aggregate(aggregate: pd.DataFrame) -> pd.DataFrame:
+def flatten_aggregate(aggregate: pd.DataFrame) -> pd.DataFrame:
     flattened = aggregate.copy()
     if isinstance(flattened.columns, pd.MultiIndex):
         flattened.columns = [
-            "_".join(str(part) for part in column if part)
+            "_".join(
+                str(part) for part in column
+                if part and not str(part).startswith("Unnamed: ")
+            )
             for column in flattened.columns
         ]
     flattened = flattened.reset_index()
@@ -598,7 +690,7 @@ def _flatten_aggregate(aggregate: pd.DataFrame) -> pd.DataFrame:
 def rank_results(
     aggregate: pd.DataFrame,
     parity_tolerance: float,
-    quota_tolerance: float = 0.01,
+    quota_tolerance: float = QUOTA_TOLERANCE,
 ) -> pd.DataFrame:
     """Rank policies by fairness feasibility, reward efficiency, and reward."""
 
@@ -606,7 +698,7 @@ def rank_results(
         raise ValueError("parity_tolerance must be in [0, 1]")
     if quota_tolerance < 0.0:
         raise ValueError("quota_tolerance cannot be negative")
-    ranked = _flatten_aggregate(aggregate)
+    ranked = flatten_aggregate(aggregate)
     required = {
         "policy",
         "cumulative_reward_mean",
@@ -629,16 +721,20 @@ def rank_results(
     ranked["fairness_violation"] = (
         ranked["parity_excess"] + ranked["quota_excess"]
     )
-    ranked["fairness_feasible"] = ranked["fairness_violation"] <= 1e-12
-    ranked["_feasibility_group"] = np.where(
-        ranked["fairness_feasible"], 0, 1
-    )
-    ranked["_violation_order"] = np.where(
-        ranked["fairness_feasible"], 0.0, ranked["fairness_violation"]
+    ranked["mean_thresholds_met"] = ranked["fairness_violation"].eq(0)
+    if "constraint_satisfaction_rate" in ranked:
+        ranked["fairness_feasible"] = ranked["constraint_satisfaction_rate"].eq(1)
+        ranked["_compliance_order"] = -ranked["constraint_satisfaction_rate"]
+    else:
+        # Old aggregate files contain only means, so episode compliance is unknown.
+        ranked["fairness_feasible"] = pd.NA
+        ranked["_compliance_order"] = 0.0
+    ranked["_violation_order"] = ranked["fairness_violation"].where(
+        ~ranked["fairness_feasible"].eq(True).fillna(False), 0.0
     )
     ranked = ranked.sort_values(
         [
-            "_feasibility_group",
+            "_compliance_order",
             "_violation_order",
             "reward_per_cost_mean",
             "cumulative_reward_mean",
@@ -648,7 +744,7 @@ def rank_results(
         kind="stable",
     ).reset_index(drop=True)
     ranked.insert(0, "rank", np.arange(1, len(ranked) + 1, dtype=int))
-    return ranked.drop(columns=["_feasibility_group", "_violation_order"])
+    return ranked.drop(columns=["_compliance_order", "_violation_order"])
 
 
 def winner_summary(ranked: pd.DataFrame, mode: str) -> str:
@@ -660,18 +756,20 @@ def winner_summary(ranked: pd.DataFrame, mode: str) -> str:
     label = "Phase 2 contextual" if mode == "contextual" else "Phase 3 CMDP"
     reward_per_cost = float(winner["reward_per_cost_mean"])
     cumulative_reward = float(winner["cumulative_reward_mean"])
-    parity_gap = float(winner["demographic_parity_gap_mean"])
+    parity_gap = winner["demographic_parity_gap_mean"]
+    gap_label = f"{parity_gap:.6f}" if pd.notna(parity_gap) else "undefined"
     quota_deficit = float(winner["total_quota_deficit_mean"])
-    if bool(winner["fairness_feasible"]):
-        qualification = "It satisfies the configured parity and quota thresholds"
-    else:
+    if "constraint_satisfaction_rate" in ranked:
+        satisfied = winner["constraint_satisfaction_rate"]
         qualification = (
-            "It is the best compromise; no fairness-feasible policy was found"
+            f"It met both feasible-opportunity constraints in {satisfied:.1%} of episodes"
         )
+    else:
+        qualification = "It led the mean-based ranking. Episode compliance is unavailable"
     return (
         f"{label} winner: {winner['policy']}. {qualification}, with mean "
         f"reward-per-cost {reward_per_cost:.6f}, cumulative reward "
-        f"{cumulative_reward:.3f}, parity gap {parity_gap:.6f}, and total "
+        f"{cumulative_reward:.3f}, feasible parity gap {gap_label}, and total "
         f"quota deficit {quota_deficit:.6f}."
     )
 
@@ -715,11 +813,13 @@ def format_ranked_table(ranked: pd.DataFrame, mode: str) -> str:
     columns = {
         "rank": "Rank",
         "policy": "Policy",
-        "fairness_feasible": "Fair",
+        "constraint_satisfaction_rate": "Feasible Joint Rate",
+        "population_constraint_satisfaction_rate": "Population Joint Rate",
         "cumulative_reward_mean": "Reward",
         "reward_per_cost_mean": "Reward/Cost",
         "repayment_rate_mean": "Repayment",
-        "demographic_parity_gap_mean": "Parity Gap",
+        "demographic_parity_gap_mean": "Feasible DP Gap",
+        "population_dp_gap_mean": "Population DP Gap",
         "total_quota_deficit_mean": "Quota Deficit",
     }
     if mode == "contextual":
@@ -748,7 +848,7 @@ def _mean_std_column(ranked: pd.DataFrame, metric: str) -> pd.Series:
     )
     return pd.Series(
         [
-            f"{float(mean):.6f} ± {float(std):.6f}"
+            f"{float(mean):.6f} ± {float(std):.6f}" if pd.notna(mean) else "Undefined"
             for mean, std in zip(means, standard_deviations)
         ],
         index=ranked.index,
@@ -760,9 +860,6 @@ def _html_ranked_table(ranked: pd.DataFrame, mode: str) -> str:
         {
             "Rank": ranked["rank"],
             "Policy": ranked["policy"],
-            "Fairness feasible": ranked["fairness_feasible"].map(
-                {True: "Yes", False: "No"}
-            ),
             "Reward (mean ± std)": _mean_std_column(
                 ranked, "cumulative_reward"
             ),
@@ -772,7 +869,7 @@ def _html_ranked_table(ranked: pd.DataFrame, mode: str) -> str:
             "Repayment (mean ± std)": _mean_std_column(
                 ranked, "repayment_rate"
             ),
-            "Parity gap (mean ± std)": _mean_std_column(
+            "Feasible DP gap (mean ± std)": _mean_std_column(
                 ranked, "demographic_parity_gap"
             ),
             "Quota deficit (mean ± std)": _mean_std_column(
@@ -780,6 +877,26 @@ def _html_ranked_table(ranked: pd.DataFrame, mode: str) -> str:
             ),
         }
     )
+    if "population_dp_gap_mean" in ranked:
+        display["Population DP gap (mean ± std)"] = _mean_std_column(
+            ranked, "population_dp_gap"
+        )
+    for column, label in (
+        ("parity_satisfaction_rate", "Feasible parity"),
+        ("population_parity_satisfaction_rate", "Population parity"),
+        ("quota_constraint_satisfaction_rate", "Quota constraint"),
+        ("constraint_satisfaction_rate", "Feasible joint"),
+        ("population_constraint_satisfaction_rate", "Population joint"),
+    ):
+        if column in ranked:
+            display[label + " satisfaction"] = ranked[column].map("{:.1%}".format)
+    for column, label in (
+        ("episodes_evaluated", "Episodes"),
+        ("parity_evaluable_episodes", "Feasible parity evaluable"),
+        ("population_parity_evaluable_episodes", "Population parity evaluable"),
+    ):
+        if column in ranked:
+            display[label] = ranked[column]
     if mode == "contextual" and "budget_utilization_mean" in ranked:
         display["Budget use (mean ± std)"] = _mean_std_column(
             ranked, "budget_utilization"
@@ -817,7 +934,7 @@ def save_evaluation_report(
     seeds: Sequence[int],
     configuration: Mapping[str, object],
     policy_parameters: Mapping[str, object],
-    quota_tolerance: float = 0.01,
+    quota_tolerance: float = QUOTA_TOLERANCE,
 ) -> pd.DataFrame:
     """Rank results and persist reproducibility and human-readable reports."""
 
@@ -848,7 +965,7 @@ def save_evaluation_report(
 <title>{escape(title)} evaluation</title><style>{REPORT_STYLE}</style></head>
 <body><h1>{escape(title)} evaluation</h1>
 <p class="winner">{escape(summary)}</p>
-<p class="note">Policies are fairness-feasible when mean demographic parity gap is at most {parity_tolerance:.6f} and mean total quota deficit is at most {quota_tolerance:.6f}. Feasible policies rank by reward-per-cost, then cumulative reward. Infeasible policies rank by constraint violation before utility.</p>
+<p class="note">Episode thresholds are {parity_tolerance:.6f} for parity and {quota_tolerance:.6f} for total quota deficit. Satisfaction rates use all runs, with evaluable counts shown separately. Ranking uses feasible-opportunity joint satisfaction first, then mean threshold excess among policies with incomplete compliance, then reward-per-cost and cumulative reward.</p>
 <h2>Ranked results</h2>{_html_ranked_table(ranked, mode)}
 <h2>Reproducibility manifest</h2><pre>{escape(json.dumps(manifest, indent=2, sort_keys=True, default=str))}</pre>
 </body></html>"""
@@ -867,7 +984,7 @@ def save_combined_report(
     output.mkdir(parents=True, exist_ok=True)
     sections: list[str] = []
     if arm_aggregate is not None and not arm_aggregate.empty:
-        arm = _flatten_aggregate(arm_aggregate)
+        arm = flatten_aggregate(arm_aggregate)
         arm = arm.sort_values("cumulative_reward_mean", ascending=False)
         columns = [
             column
@@ -876,7 +993,7 @@ def save_combined_report(
                 "cumulative_reward_mean",
                 "reward_per_cost_mean",
                 "repayment_rate_mean",
-                "demographic_parity_gap_mean",
+                "allocation_share_gap_mean",
                 "quota_satisfaction_rate_mean",
             )
             if column in arm
@@ -887,7 +1004,7 @@ def save_combined_report(
                 "cumulative_reward_mean": "Mean reward",
                 "reward_per_cost_mean": "Mean reward/cost",
                 "repayment_rate_mean": "Mean repayment",
-                "demographic_parity_gap_mean": "Mean parity gap",
+                "allocation_share_gap_mean": "Mean allocation-share gap",
                 "quota_satisfaction_rate_mean": "Mean quota satisfaction",
             }
         )

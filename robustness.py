@@ -13,7 +13,14 @@ import numpy as np
 import pandas as pd
 
 from Data.feature_encoder import BorrowerFeatureEncoder
-from evaluate import REPORT_STYLE, CMDPPolicyFactory, compare_cmdp_policies
+from evaluate import (
+    CONSTRAINT_RATE_FIELDS,
+    FAIRNESS_COUNT_PREFIXES,
+    REPORT_STYLE,
+    CMDPPolicyFactory,
+    compare_cmdp_policies,
+)
+from metrics import QUOTA_NUMERICAL_TOLERANCE, total_quota_deficit
 from models.environment_config import CMDPEnvironmentConfig
 
 
@@ -54,23 +61,44 @@ def _quota_opportunity_feasible(
     opportunities: Mapping[str, int],
     loans_funded: int,
     target_shares: Mapping[str, float],
+    tolerance: float = 0.0,
 ) -> bool:
-    """Screen whether observed opportunities can support each quota at this volume."""
+    """Screen achievable total deficit at the observed integer loan volume."""
 
-    if sum(target_shares.values()) > 1.0 + 1e-12:
+    if loans_funded > sum(opportunities.values()):
         return False
-    return all(
-        opportunities.get(group, 0)
-        >= ceil(max(0.0, target * loans_funded - 1e-12))
-        for group, target in target_shares.items()
+    if loans_funded == 0:
+        return total_quota_deficit({}, target_shares) <= tolerance
+
+    # A loan below a group's target reduces deficit by one loan unit.
+    # At most one additional loan per group removes a fractional unit.
+    whole_units = 0
+    fractional_units = []
+    total_target_share = 0.0
+    for group, target in target_shares.items():
+        if target <= 0:
+            continue
+        total_target_share += target
+        available = opportunities.get(group, 0)
+        target_units = target * loans_funded
+        whole = floor(target_units)
+        whole_units += min(whole, available)
+        if available > whole:
+            fractional_units.append(target_units - whole)
+
+    remaining = max(0, loans_funded - whole_units)
+    covered = min(loans_funded, whole_units) + sum(
+        sorted(fractional_units, reverse=True)[:remaining]
     )
+    minimum_deficit = max(0.0, total_target_share - covered / loans_funded)
+    return minimum_deficit <= tolerance + QUOTA_NUMERICAL_TOLERANCE
 
 
 def _parity_opportunity_feasible(
     opportunities: Mapping[str, int],
     loans_funded: int,
     tolerance: float,
-) -> bool:
+) -> bool | None:
     """Integer screen for parity feasibility at the observed aggregate volume.
 
     It asks whether integer allocations with the actual total loan count could
@@ -80,24 +108,28 @@ def _parity_opportunity_feasible(
     """
 
     counts = [int(value) for value in opportunities.values() if value > 0]
-    if loans_funded == 0 or len(counts) <= 1:
-        return True
     if loans_funded > sum(counts):
         return False
+    if len(counts) < 2:
+        return None
+    if loans_funded == 0:
+        return True
     candidate_minimum_rates = {0.0}
     for count in counts:
         for allocations in range(min(count, loans_funded) + 1):
             candidate_minimum_rates.add(allocations / count)
     for minimum_rate in candidate_minimum_rates:
-        lower = sum(
+        lower = [
             ceil(max(0.0, minimum_rate * count - 1e-12))
             for count in counts
-        )
-        upper = sum(
+        ]
+        upper = [
             floor(min(1.0, minimum_rate + tolerance) * count + 1e-12)
             for count in counts
-        )
-        if lower <= loans_funded <= upper:
+        ]
+        if all(lo <= hi for lo, hi in zip(lower, upper)) and (
+            sum(lower) <= loans_funded <= sum(upper)
+        ):
             return True
     return False
 
@@ -142,18 +174,14 @@ def _add_sweep_metrics(
     )
     raw["constraint_violation"] = raw["parity_excess"] + raw["quota_excess"]
     raw["fairness_violation"] = raw["constraint_violation"]
-    raw["constraint_satisfied"] = raw["constraint_violation"] <= 1e-12
 
     if trajectories.empty:
         raw["fairness_violations"] = 0
     else:
         trajectory_violations = trajectories.assign(
             _violated=(
-                (trajectories["demographic_parity_gap"] > case.parity_tolerance)
-                | (
-                    trajectories["total_quota_deficit"]
-                    > quota_tolerance
-                )
+                trajectories["parity_satisfied"].eq(0)
+                | ~trajectories["quota_satisfied"]
             ).astype(int)
         )
         counts = trajectory_violations.groupby(["policy", "seed"])[
@@ -165,7 +193,7 @@ def _add_sweep_metrics(
         ]
 
     quota_feasible: list[bool] = []
-    parity_feasible: list[bool] = []
+    parity_feasible: list[bool | None] = []
     for _, row in raw.iterrows():
         opportunities = _episode_opportunities(row)
         loans_funded = int(row["loans_funded"])
@@ -174,6 +202,7 @@ def _add_sweep_metrics(
                 opportunities,
                 loans_funded,
                 case.target_shares,
+                quota_tolerance,
             )
         )
         parity_feasible.append(
@@ -184,14 +213,18 @@ def _add_sweep_metrics(
             )
         )
     raw["quota_feasible"] = quota_feasible
-    raw["parity_feasible"] = parity_feasible
-    raw["fairness_feasible"] = raw["quota_feasible"] & raw["parity_feasible"]
+    raw["parity_feasible"] = pd.Series(
+        parity_feasible, index=raw.index, dtype="boolean"
+    )
+    raw["opportunity_screens_passed"] = raw["quota_feasible"] & raw["parity_feasible"]
+    raw["fairness_feasible"] = raw["opportunity_screens_passed"]  # Legacy screen alias.
     raw["feasibility_status"] = np.select(
         [
-            ~raw["fairness_feasible"],
-            raw["constraint_satisfied"],
+            raw["opportunity_screens_passed"].eq(False).to_numpy(dtype=bool, na_value=False),
+            ~raw["parity_evaluable"],
+            raw["constraint_satisfied"].eq(1),
         ],
-        ["opportunity_infeasible", "constraint_satisfied"],
+        ["opportunity_infeasible", "parity_not_evaluable", "constraint_satisfied"],
         default="policy_constraint_violation",
     )
 
@@ -204,10 +237,8 @@ def _add_sweep_metrics(
         for column in raw.columns
         if column.startswith(
             (
-                "funded_",
-                "opportunities_",
+                *FAIRNESS_COUNT_PREFIXES,
                 "allocation_share_",
-                "funding_rate_",
                 "quota_deficit_",
             )
         )
@@ -221,12 +252,18 @@ def _add_sweep_metrics(
         raw["opportunities_minority"] = 0
     if "funded_minority" not in raw:
         raw["funded_minority"] = 0
-    if "funding_rate_minority" not in raw:
-        raw["funding_rate_minority"] = 0.0
     raw["observed_primary_minority_share"] = np.where(
         raw["total_opportunities"] > 0,
         raw["opportunities_minority"] / raw["total_opportunities"],
         0.0,
+    )
+    population_columns = [
+        column for column in raw if column.startswith("population_opportunities_")
+    ]
+    raw["total_population_opportunities"] = raw[population_columns].sum(axis=1)
+    raw["observed_population_primary_minority_share"] = (
+        raw.get("population_opportunities_minority", 0)
+        / raw["total_population_opportunities"].replace(0, np.nan)
     )
     return raw
 
@@ -249,6 +286,10 @@ AGGREGATE_METRICS = (
     "capital_turnover",
     "capital_survival_ratio",
     "demographic_parity_gap",
+    "feasible_dp_gap",
+    "population_dp_gap",
+    "feasible_dp_groups",
+    "population_dp_groups",
     "quota_satisfaction_rate",
     "total_quota_deficit",
     "fairness_violations",
@@ -257,12 +298,16 @@ AGGREGATE_METRICS = (
     "quota_feasible",
     "parity_feasible",
     "fairness_feasible",
+    "opportunity_screens_passed",
     "lambda_quota_final",
     "lambda_parity_final",
     "funded_minority",
     "opportunities_minority",
     "funding_rate_minority",
     "observed_primary_minority_share",
+    "observed_population_primary_minority_share",
+    "total_opportunities",
+    "total_population_opportunities",
 )
 
 
@@ -276,16 +321,32 @@ def aggregate_sweep_results(raw_results: pd.DataFrame) -> pd.DataFrame:
         "policy",
         "is_baseline",
     ]
-    metrics = [metric for metric in AGGREGATE_METRICS if metric in raw_results]
+    metrics = {metric: metric for metric in AGGREGATE_METRICS if metric in raw_results}
+    metrics.update(
+        (column, column) for column in raw_results
+        if column.startswith(FAIRNESS_COUNT_PREFIXES)
+    )
+    metrics.update(
+        (rate, outcome) for rate, outcome in CONSTRAINT_RATE_FIELDS.items()
+        if outcome in raw_results
+    )
     records: list[dict[str, object]] = []
     for keys, frame in raw_results.groupby(group_columns, dropna=False, sort=True):
         identity = dict(zip(group_columns, keys))
-        for metric in metrics:
-            values = pd.to_numeric(frame[metric], errors="coerce").dropna()
-            if values.empty:
-                continue
+        identity["episodes_evaluated"] = len(frame)
+        for field in ("parity_evaluable", "population_parity_evaluable"):
+            if field in frame:
+                identity[f"{field}_episodes"] = int(frame[field].sum())
+        for metric, source in metrics.items():
+            values = pd.to_numeric(frame[source], errors="coerce")
+            if (
+                source in CONSTRAINT_RATE_FIELDS.values()
+                or source.startswith(FAIRNESS_COUNT_PREFIXES)
+            ):
+                values = values.fillna(0)
+            values = values.dropna()
             n_seeds = int(len(values))
-            mean = float(values.mean())
+            mean = float(values.mean()) if n_seeds else np.nan
             std = float(values.std(ddof=1)) if n_seeds > 1 else 0.0
             margin = 1.96 * std / sqrt(n_seeds) if n_seeds else 0.0
             records.append(
@@ -303,7 +364,9 @@ def aggregate_sweep_results(raw_results: pd.DataFrame) -> pd.DataFrame:
 
 
 def _metric_rows(aggregate: pd.DataFrame, metric: str) -> pd.DataFrame:
-    return aggregate.loc[aggregate["metric"] == metric].copy()
+    return aggregate.loc[
+        aggregate["metric"].eq(metric) & aggregate["metric_mean"].notna()
+    ].copy()
 
 
 def _plot_metric_by_value(
@@ -428,7 +491,7 @@ def build_sweep_summary(
     )
     parity = _average_extreme_statement(
         aggregate,
-        "demographic_parity_gap",
+        "feasible_dp_gap",
         False,
         setting_label,
     )
@@ -436,7 +499,7 @@ def build_sweep_summary(
 
     if sweep_name == "budget":
         reward_rows = _metric_rows(aggregate, "eventual_cumulative_reward")
-        parity_rows = _metric_rows(aggregate, "demographic_parity_gap")
+        parity_rows = _metric_rows(aggregate, "feasible_dp_gap")
         baseline = reward_rows.loc[reward_rows["is_baseline"]]
         tight_value = float(reward_rows["sweep_value"].min())
         if not baseline.empty:
@@ -477,7 +540,7 @@ def build_sweep_summary(
                 statements.append(
                     f"For the default-setting reward leader {reference_policy}, "
                     f"reducing initial capital to {tight_value:.0%} changed "
-                    f"eventual reward by {reward_change:+.2f}% and parity gap "
+                    f"eventual reward by {reward_change:+.2f}% and feasible parity gap "
                     f"by {tight_gap - baseline_gap:+.4f}."
                 )
         quota = _metric_rows(aggregate, "quota_satisfaction_rate")
@@ -490,7 +553,7 @@ def build_sweep_summary(
                 f"{maintained} of {len(frame)} budget settings."
             )
     elif sweep_name == "group_imbalance":
-        satisfied = _metric_rows(aggregate, "constraint_satisfied")
+        satisfied = _metric_rows(aggregate, "constraint_satisfaction_rate")
         for policy, frame in satisfied.groupby("policy"):
             if "fair_hard" not in policy:
                 continue
@@ -511,7 +574,7 @@ def build_sweep_summary(
                 )
     elif sweep_name == "fairness_strength":
         reward_rows = _metric_rows(aggregate, "eventual_cumulative_reward")
-        gap_rows = _metric_rows(aggregate, "demographic_parity_gap")
+        gap_rows = _metric_rows(aggregate, "feasible_dp_gap")
         identity = ["policy", "sweep_value", "parameter_kind"]
         frontier = reward_rows.merge(
             gap_rows,
@@ -531,7 +594,7 @@ def build_sweep_summary(
                 else 0.0
             )
             statements.append(
-                f"For {policy}, the lowest mean parity gap occurred at strength "
+                f"For {policy}, the lowest mean feasible parity gap occurred at strength "
                 f"{float(best_gap['sweep_value']):g} "
                 f"({float(best_gap['metric_mean_gap']):.4f}); eventual reward "
                 f"changed by {-reduction:+.2f}% relative to strength 0."
@@ -551,6 +614,9 @@ BASELINE_COMPARISON_METRICS = (
     "final_capital_at_risk",
     "eventual_terminal_capital",
     "demographic_parity_gap",
+    "population_dp_gap",
+    "population_dp_groups",
+    "feasible_dp_groups",
     "quota_satisfaction_rate",
     "total_quota_deficit",
     "lambda_quota_final",
@@ -643,7 +709,8 @@ def _plot_sweep(
     }
     metrics = [
         "eventual_cumulative_reward",
-        "demographic_parity_gap",
+        "feasible_dp_gap",
+        "population_dp_gap",
         "quota_satisfaction_rate",
     ]
     if sweep_name == "budget":
@@ -665,7 +732,7 @@ def _plot_sweep(
         ):
             paths.append(path)
 
-    frontier_metrics = [("demographic_parity_gap", "eventual_cumulative_reward")]
+    frontier_metrics = [("feasible_dp_gap", "eventual_cumulative_reward")]
     if sweep_name == "fairness_strength":
         frontier_metrics.append(
             ("quota_satisfaction_rate", "eventual_cumulative_reward")
@@ -719,6 +786,7 @@ def run_cmdp_sweep(
             parity_tolerance=case.parity_tolerance,
             seeds=seeds,
             encoder=shared_encoder,
+            quota_tolerance=quota_tolerance,
         )
         raw_frames.append(
             _add_sweep_metrics(
@@ -774,6 +842,7 @@ def run_cmdp_sweep(
             }
         ),
         "horizon": default_config.max_rounds,
+        "quota_tolerance": quota_tolerance,
         "default_phase3_parameters": asdict(default_config),
         "timestamp_utc": datetime.now(timezone.utc).isoformat(),
         "cases": [
@@ -790,10 +859,11 @@ def run_cmdp_sweep(
             for case in cases
         ],
         "feasibility_definition": (
-            "fairness_feasible is an aggregate opportunity-count screen at the "
-            "episode's actual funded volume; constraint_satisfied records policy "
-            "performance. Timing and liquidity can make a screened-feasible case "
-            "harder than the aggregate count screen indicates."
+            "opportunity_screens_passed combines separate quota and parity screens "
+            "using feasible opportunities and the actual funded volume. Passing "
+            "both leaves joint allocation feasibility unresolved, including costs, "
+            "capital, batch limits, repayment delays and arrival timing. "
+            "constraint_satisfied records the observed episode outcome."
         ),
     }
     (output / "config.json").write_text(
@@ -801,7 +871,8 @@ def run_cmdp_sweep(
         encoding="utf-8",
     )
     statements = list(build_sweep_summary(sweep_name, aggregate))
-    infeasible = int((~raw["fairness_feasible"]).sum())
+    infeasible = int((raw["feasibility_status"] == "opportunity_infeasible").sum())
+    not_evaluable = int((~raw["parity_evaluable"]).sum())
     policy_violations = int(
         (raw["feasibility_status"] == "policy_constraint_violation").sum()
     )
@@ -809,10 +880,10 @@ def run_cmdp_sweep(
         (raw["feasibility_status"] == "constraint_satisfied").sum()
     )
     statements.append(
-        f"Feasibility accounting classified {infeasible} of {len(raw)} episodes "
-        f"as opportunity-count infeasible, {policy_violations} as policy "
-        f"violations in screened-feasible settings, and {constraints_satisfied} "
-        "as constraint-satisfied."
+        f"Feasible-opportunity screens ruled out satisfaction in {infeasible} of "
+        f"{len(raw)} episodes. {policy_violations} episodes passed both screens "
+        f"and violated a constraint. {constraints_satisfied} satisfied both "
+        f"constraints. Feasible parity was undefined in {not_evaluable} episodes."
     )
     summary_payload = {
         "statements": statements,
@@ -820,6 +891,10 @@ def run_cmdp_sweep(
         "opportunity_infeasible_episodes": infeasible,
         "policy_constraint_violation_episodes": policy_violations,
         "constraint_satisfied_episodes": constraints_satisfied,
+        "parity_not_evaluable_episodes": not_evaluable,
+        "population_parity_not_evaluable_episodes": int(
+            (~raw["population_parity_evaluable"]).sum()
+        ),
     }
     (output / "summary.json").write_text(
         json.dumps(summary_payload, indent=2, sort_keys=True) + "\n",
@@ -844,10 +919,11 @@ def run_cmdp_sweep(
 def _summary_table(artifact: SweepArtifacts) -> str:
     metrics = [
         "eventual_cumulative_reward",
-        "demographic_parity_gap",
+        "feasible_dp_gap",
+        "population_dp_gap",
         "quota_satisfaction_rate",
         "reward_per_cost",
-        "constraint_satisfied",
+        *CONSTRAINT_RATE_FIELDS,
     ]
     if artifact.name == "group_imbalance":
         metrics.append("funding_rate_minority")
@@ -877,10 +953,12 @@ def _summary_table(artifact: SweepArtifacts) -> str:
             "policy": "Policy",
             "is_baseline": "Default",
             "eventual_cumulative_reward": "Eventual reward mean [95% CI]",
-            "demographic_parity_gap": "Parity gap mean [95% CI]",
+            "feasible_dp_gap": "Feasible DP gap mean [95% CI]",
+            "population_dp_gap": "Population DP gap mean [95% CI]",
             "quota_satisfaction_rate": "Quota satisfaction mean [95% CI]",
             "reward_per_cost": "Reward/cost mean [95% CI]",
-            "constraint_satisfied": "Constraint-satisfied rate [95% CI]",
+            "constraint_satisfaction_rate": "Feasible joint satisfaction [95% CI]",
+            "population_constraint_satisfaction_rate": "Population joint satisfaction [95% CI]",
             "funding_rate_minority": "Minority funding rate mean [95% CI]",
         }
     )
@@ -951,8 +1029,10 @@ def save_mode4_report(
             f"{escape(', '.join(f'{value:g}' for value in values))}</p>"
             f"<h3>Data-derived summary</h3><ul>{summary_items}</ul>"
             f"<h3>Aggregate results</h3><p class=\"note\">Values are seed "
-            "means with normal-approximation 95% confidence intervals. Default "
-            "marks the existing Phase 3 setting.</p>"
+            "means with normal-approximation 95% confidence intervals. "
+            "Constraint satisfaction rates use all episodes. The aggregate CSV "
+            "records the number of episodes with evaluable parity for each "
+            "denominator. Default marks the existing Phase 3 setting.</p>"
             f"{_summary_table(artifact)}<h3>Plots</h3>"
             f'<div class="plots">{images}</div>'
         )

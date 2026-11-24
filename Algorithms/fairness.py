@@ -5,8 +5,8 @@ from collections.abc import Mapping, Sequence
 import numpy as np
 
 from Algorithms.bandit import BasePolicy
-from Environments.base_environment import BanditEnvironment
-from metrics import allocation_shares, group_funding_rates
+from Environments.base_environment import BanditEnvironment, BanditMode
+from metrics import group_funding_rates, quota_deficits
 from models.events import FeedbackEvent
 
 
@@ -84,7 +84,13 @@ class HardFairPolicy(_FairPolicy):
         rates = group_funding_rates(
             env.group_funding_counts, env.group_opportunity_counts
         )
-        if rates and max(rates.values()) - min(rates.values()) > self.parity_tolerance:
+        if env.mode == BanditMode.ARM:
+            # Preserve the arm intervention's affordable group-round rates.
+            rates = {group: rates.get(group, 0.0) for group in env.groups}
+        if (
+            len(rates) >= 2
+            and max(rates.values()) - min(rates.values()) > self.parity_tolerance
+        ):
             minimum = min(rates.values())
             disadvantaged = {
                 group for group, rate in rates.items() if np.isclose(rate, minimum)
@@ -115,11 +121,8 @@ class SoftFairPolicy(_FairPolicy):
     def scores(self, env: BanditEnvironment) -> np.ndarray:
         """Compute scores with bonuses for quota deficits."""
         scores = self.base_policy.scores(env).copy()
-        shares = allocation_shares(env.group_funding_counts)
+        deficits = quota_deficits(env.group_funding_counts, self.target_shares)
         for index, group in enumerate(env.current_groups()):
-            deficit = max(
-                0.0, self.target_shares.get(group, 0.0) - shares.get(group, 0.0)
-            )
             if np.isfinite(scores[index]):
-                scores[index] += self.penalty_lambda * deficit
+                scores[index] += self.penalty_lambda * deficits.get(group, 0.0)
         return scores

@@ -42,9 +42,13 @@ from Data.arm_data import default_arm_configuration, load_arm_configuration
 from Data.feature_encoder import BorrowerFeatureEncoder
 from Environments.base_environment import BanditEnvironment
 from evaluate import (
+    ARM_PARITY_TOLERANCE,
+    CONTEXTUAL_PARITY_TOLERANCE,
+    QUOTA_TOLERANCE,
     compare_cmdp_policies,
     compare_policies,
     display_results,
+    flatten_aggregate,
     rank_results,
     save_combined_report,
     save_cmdp_results,
@@ -132,10 +136,6 @@ DEFAULT_TARGET_SHARES = {
     "women": 0.25,
 }
 
-CONTEXTUAL_PARITY_TOLERANCE = 0.010
-QUOTA_TOLERANCE = 0.01
-
-
 def build_arm_policy_factories(target_shares: dict[str, float]):
     """Builds a dictionary of arm policy factories based on the provided target shares.
     Each factory is a lambda function that takes an environment and a seed, and returns an instance of the corresponding policy."""
@@ -170,7 +170,7 @@ def build_arm_policy_factories(target_shares: dict[str, float]):
         "fair_ucb_hard": lambda env, seed: HardFairPolicy(
             BudgetedUCBPolicy(n_arms(env), seed=seed),
             target_shares,
-            parity_tolerance=0.35,
+            parity_tolerance=ARM_PARITY_TOLERANCE,
             seed=seed,
         ),
         "fair_ucb_soft": lambda env, seed: SoftFairPolicy(
@@ -647,18 +647,15 @@ def run_cmdp(
 def combine_aggregate_results(
     results: Mapping[str, "pd.DataFrame"],
 ):
-    """Flatten each phase's aggregate metrics into one comparable report."""
+    """Combine phase results with separate columns for phase-specific parity."""
 
     import pandas as pd
 
     frames: list[pd.DataFrame] = []
     for mode, aggregate in results.items():
-        flattened = aggregate.copy()
-        flattened.columns = [
-            "_".join(str(part) for part in column if part)
-            for column in flattened.columns
-        ]
-        flattened = flattened.reset_index()
+        flattened = flatten_aggregate(
+            aggregate.drop(columns="demographic_parity_gap", level=0, errors="ignore")
+        )
         flattened.insert(0, "mode", mode)
         frames.append(flattened)
     combined = pd.concat(frames, ignore_index=True, sort=False)
@@ -698,7 +695,9 @@ def run_all(args: argparse.Namespace):
             "budget_utilization_mean",
             "capital_turnover_mean",
             "capital_survival_ratio_mean",
-            "demographic_parity_gap_mean",
+            "allocation_share_gap_mean",
+            "feasible_dp_gap_mean",
+            "population_dp_gap_mean",
             "quota_satisfaction_rate_mean",
         )
         if column in combined

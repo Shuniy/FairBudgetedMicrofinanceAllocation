@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import numpy as np
 import pytest
 
 from Data.borrower import Borrower
@@ -61,9 +62,25 @@ def test_upper_middle_income_band_is_reachable() -> None:
 
 
 def test_protected_features_are_excluded_by_default() -> None:
-    borrower = Borrower(application(disability=True))
+    borrower = Borrower(application(disability=True, age=65, reserved_by_government=True))
+    control = Borrower(application(gender=Gender.MALE, marginalized_community=False))
     safe = BorrowerFeatureEncoder()
     audited = BorrowerFeatureEncoder(include_protected_attributes=True)
-    assert audited.n_features == safe.n_features + 5
-    assert safe.transform(borrower).shape == (safe.n_features,)
-    assert not any("female" in name for name in safe.feature_names)
+    assert safe.n_features == 25
+    assert audited.n_features == 33
+    assert borrower.poverty_relief_score != control.poverty_relief_score
+    assert borrower.vulnerability_score != control.vulnerability_score
+    np.testing.assert_array_equal(safe.transform(borrower), safe.transform(control))
+    assert safe.transform_many([borrower, control]).shape == (2, 25)
+    assert audited.transform_many([borrower, control]).shape == (2, 33)
+    values = dict(zip(audited.feature_names, audited.transform(borrower)))
+    assert values["age_scaled"] == pytest.approx(47 / 62)
+    assert values["poverty_relief_score"] == borrower.poverty_relief_score
+    assert values["vulnerability_score"] == borrower.vulnerability_score
+    for feature in ("gender_female", "disability", "marginalized", "reserved", "aged"):
+        assert values[feature] == 1
+    for feature in (
+        "age_scaled", "poverty_relief_score", "vulnerability_score",
+        "gender_female", "disability", "marginalized", "reserved", "aged",
+    ):
+        assert feature not in safe.feature_names

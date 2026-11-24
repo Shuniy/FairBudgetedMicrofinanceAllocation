@@ -54,6 +54,7 @@ class BanditEnvironment:
         self.history: list[dict[str, Any]] = []
         self.group_funding_counts: dict[str, int] = {}
         self.group_opportunity_counts: dict[str, int] = {}
+        self.group_population_opportunity_counts: dict[str, int] = {}
         self.pending_feedback: list[FeedbackEvent] = []
         self._done = False
         self.reset()
@@ -133,6 +134,7 @@ class BanditEnvironment:
         self.round_index = 0
         self.history = []
         self.pending_feedback = []
+        self.group_population_opportunity_counts = defaultdict(int)
 
         if self.mode == BanditMode.ARM:
             self.arm_allocation_counts = np.zeros(self.n_arms, dtype=int)
@@ -156,9 +158,8 @@ class BanditEnvironment:
             )
 
         self._done = False
+        self._record_current_opportunities()
         self._refresh_done_flag()
-        if not self._done:
-            self._record_current_opportunities()
         return self.observation()
 
     def _sample_arm_costs(self) -> np.ndarray:
@@ -225,15 +226,17 @@ class BanditEnvironment:
         ]
 
     def _record_current_opportunities(self) -> None:
-        """Record the current opportunities for each fairness group based on feasible actions."""
-        feasible = self.feasible_actions()
+        """Count arrivals once, with a separate count of affordable opportunities."""
         if self.mode == BanditMode.ARM:
-            for group in {self.arms[index].group for index in feasible}:
+            for group in {self.arms[index].group for index in self.feasible_actions()}:
                 self.group_opportunity_counts[group] += 1
             return
 
-        for index in feasible:
-            group = self.current_pool[index].fairness_group
+        groups = self.current_groups()
+        for group in groups:
+            self.group_population_opportunity_counts[group] += 1
+        for index in self.feasible_actions():
+            group = groups[index]
             self.group_opportunity_counts[group] += 1
             self.group_funding_counts.setdefault(group, 0)
 
@@ -253,6 +256,9 @@ class BanditEnvironment:
             observation["arm_allocation_counts"] = self.arm_allocation_counts.copy()
         else:
             observation["contexts"] = self.context_matrix().copy()
+            observation["group_population_opportunity_counts"] = dict(
+                self.group_population_opportunity_counts
+            )
         return observation
 
     def _release_due_feedback(self) -> tuple[FeedbackEvent, ...]:
@@ -324,6 +330,7 @@ class BanditEnvironment:
         self.group_funding_counts[group] += 1
         funding_snapshot = dict(self.group_funding_counts)
         opportunity_snapshot = dict(self.group_opportunity_counts)
+        population_snapshot = dict(self.group_population_opportunity_counts)
 
         if self.mode == BanditMode.ARM:
             observed = (
@@ -364,13 +371,13 @@ class BanditEnvironment:
         self.round_index += 1
         if self.mode == BanditMode.ARM:
             self._current_costs = self._sample_arm_costs()
+            self._record_current_opportunities()
         elif self.round_index < self.config.max_rounds:
             self.current_pool = self.generator.generate_pool(
                 self.contextual_config.pool_size
             )
-        self._refresh_done_flag()
-        if not self._done:
             self._record_current_opportunities()
+        self._refresh_done_flag()
 
         return StepResult(
             round_index=result_round,
@@ -383,6 +390,7 @@ class BanditEnvironment:
             observed_feedback=observed,
             funding_counts=funding_snapshot,
             opportunity_counts=opportunity_snapshot,
+            population_opportunity_counts=population_snapshot,
             true_repayment_probability=probability,
             metadata=metadata,
             done=self.done,

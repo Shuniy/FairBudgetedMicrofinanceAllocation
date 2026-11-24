@@ -2,7 +2,7 @@
 
 This project simulates a lender deciding which loans to fund with limited money. It compares strategies that learn from repayments, account for loan costs, and try to give different borrower groups access to funding.
 
-Choose a phase, and follow its command through the functions to the saved results. All numerical examples come from the existing `outputs/` files; the experiments were not rerun to write this readme.
+Choose a phase, and follow its command through the functions to the saved results. The saved comparisons in `outputs/` predate the fairness corrections. Their parity values, rankings and sweep conclusions use the previous definitions and require regeneration for the preprint.
 
 ## Contents
 
@@ -163,13 +163,13 @@ flowchart LR
     F --> G["generate_pool(): candidate list"]
 ```
 
-The default encoder produces 28 features: 13 numerical/Boolean entries, five sector indicators, six purpose indicators, and four region-type indicators. An indicator is 1 when a category applies and 0 otherwise. Twenty applicants therefore form a **20 × 28 matrix**: applicants are rows, features are columns.
+The default encoder produces 25 features, including ten numeric or Boolean entries, five sector indicators, six purpose indicators and four region-type indicators. Twenty applicants form a **20 × 25 matrix** with one row per applicant.
 
 The generator uses a logistic formula to create hidden repayment probabilities between 0.05 and 0.95. The learner estimates rewards from observed funded loans. Its ridge model maintains feature weights: observations adjust those weights to better fit repayment outcomes. Regularization stabilizes estimates when little data is available. A default also teaches the model something.
 
 For readers following the mathematics, the ridge update is `A ← A + x xᵀ`, `b ← b + r x`, with weights `θ = solve(A, b)`. Here `x` is one borrower's feature vector and `r` is 0 or 1. The prediction is `xᵀθ`. These linear estimates and exploration scores are not automatically probabilities in the range 0–1.
 
-The default encoder omits the optional direct protected-group indicators, but still includes age and derived poverty/vulnerability scores that depend partly on protected characteristics. `protected_attributes_in_prediction: false` does not mean all such information has been removed.
+The default vector excludes the primary audit group, protected indicators, age, poverty-relief score and vulnerability score. Protected attributes and scores remain on the borrower for monitoring and other existing uses. The optional protected representation has 33 features. Legitimate predictors can still correlate with protected attributes.
 
 ## Phase 1: learn about borrower groups — Mode 1
 
@@ -246,7 +246,7 @@ Budget utilization = 597.7302 / 600 = 99.62%
 Remaining budget  = 600 − 597.7302  = 2.2698
 ```
 
-It funded A/B/C respectively 5/12/118 times. Only C met its target, so quota satisfaction was `1 / 3 = 33.33%`. Its parity gap was 0.83648; the [fairness section](#what-fairness-means) explains this different denominator.
+It funded A/B/C respectively 5/12/118 times. Only C met its target, so quota satisfaction was `1 / 3 = 33.33%`. These counts give an allocation-share gap of `(118 − 5) / 135 ≈ 0.83704` under the current definition.
 
 Across ten seeds, [the aggregate results](outputs/arm/aggregate_results.csv) show:
 
@@ -406,7 +406,7 @@ predicted reward + uncertainty bonus
 − shadow price × (requested loan / median loan in the current pool)
 ```
 
-A **shadow price** is the heuristic score penalty per unit of normalized loan cost. For portfolio LinUCB and epsilon-greedy, it increases with liquidity pressure and default losses, while principal due soon provides relief. Portfolio Thompson sampling and the Informed Portfolio-Aware Heuristic use a simpler liquidity-dependent penalty. The ridge model uses the borrower's 28 features.
+A **shadow price** is the heuristic score penalty per unit of normalized loan cost. For portfolio LinUCB and epsilon-greedy, it increases with liquidity pressure and default losses, while principal due soon provides relief. Portfolio Thompson sampling and the Informed Portfolio-Aware Heuristic use a simpler liquidity-dependent penalty. The ridge model now uses the borrower's 25 default features.
 
 The Lagrangian wrapper normalizes base scores and subtracts penalties for projected quota deficits and parity excess. Its `lambda_quota` and `lambda_parity` weights adapt after a five-round warmup, starting at 0.20 with learning rate 0.20 and a cap of 8. Larger weights make fairness violations more costly to the selection rule.
 
@@ -521,24 +521,26 @@ Scenario results go to `all_scenarios/scenario_1/`, and so on, beneath the same 
 
 ## What fairness means
 
-Fairness is measured through two different questions: **who receives the funded loans**, and **how often available applicants from each group get funded**.
+Phase 1 compares groups' shares of all loans. Phases 2–3 compare the fraction of arriving or affordable applicants funded within each group.
 
 | Measurement | Formula | Example |
 | --- | --- | --- |
 | Allocation share | Group's funded loans ÷ all funded loans | 137 of 450 loans gives 30.44%. |
-| Funding rate | Group's funded loans ÷ group's affordable opportunities | 137 of 951 opportunities gives 14.41%. |
-| Demographic parity gap | Highest group funding rate − lowest group funding rate | 0.04 means a four-percentage-point gap; smaller is better for parity. |
+| Phase 1 allocation-share gap | Highest allocation share − lowest allocation share across configured groups | Shares of 50%, 30% and 20% give 0.30. |
+| Population funding rate | Group's funded loans ÷ all eligible applicants arriving in that group | 20 of 100 arrivals gives 20%. |
+| Feasible-opportunity funding rate | Group's funded loans ÷ applicants affordable at pool arrival in that group | 20 of 50 affordable arrivals gives 40%. |
+| Population or feasible demographic parity gap | Highest group funding rate − lowest group funding rate, using the designated denominator | A gap of 0.04 is four percentage points. |
 | Quota deficit | `max(0, target share − actual allocation share)` | Target 25%, actual 20% gives a deficit of 0.05. |
 | Total quota deficit | Sum of positive group deficits | Overfunding one group does not cancel another group's shortage. |
-| Quota satisfaction rate | Target groups meeting their minimum share ÷ number of target groups | Three of four gives 0.75. |
+| Quota satisfaction rate | Positive targets met within `1e-12` ÷ number of positive targets | Three of four gives 0.75. With no positive targets the rate is 1. |
 
 Phase 1 targets are A 20%, B 30%, C 30%. Phases 2–3 target `disabled` 4%, `reserved` 8%, `minority` 12%, and `women` 25%. These are minimum shares of **loan counts**, not money. The unassigned share remains flexible.
 
 Each individual borrower is counted in one primary audit group, with priority `disabled → reserved → minority → women → aged → none`. A woman with a disability is counted under `disabled`; `funded_women` therefore does not count every female borrower. `aged` and `none` participate in group comparisons but have no default quota.
 
-An opportunity in Phase 1 is an affordable offer for a group at a decision; in Phases 2–3 it is an affordable applicant counted when the pool arrives. Near budget exhaustion, different groups may have different opportunity counts. For Phase 1's Budgeted UCB seed-0 example, parity is `118/135 − 5/133 = 0.83648`, comparing C's and A's funding rates rather than their allocation shares.
+With no loans, all allocation shares are zero for quota calculations and Phase 1 parity is unevaluable. Applicant parity excludes groups with zero opportunities and is undefined with fewer than two contributing groups. Each pool contributes once. Population counts include arrivals before affordability filtering within the observed episode. Phase 3 checks affordability after maturities and reserve checks, before selecting the batch.
 
-**Hard fairness** first intervenes for quota shortages and can then prioritize low funding rates when parity is outside tolerance. “Hard” refers to restrictions on selection; it does not guarantee all final quotas and parity thresholds in every episode. **Soft fairness** adds a fixed quota bonus in Phases 1–2. **Lagrangian fairness** in Phase 3 adapts penalty weights for projected violations.
+**Hard fairness** is a priority-based intervention. It looks for an eligible candidate in a group with a projected quota shortfall, then looks for one in the lowest-rate groups if parity exceeds tolerance. It delegates to the base policy on the full feasible set when neither restriction applies. Phase 1 preserves its affordable group-round intervention rate. Phases 2–3 use feasible-opportunity funding rates. **Soft fairness** adds a quota bonus to raw scores in Phases 1–2, so its effect depends on the base score scale. **Lagrangian fairness** in Phase 3 adapts penalty weights for projected violations. See the formulas in [Mathematical formulation](MATHEMATICAL_FORMULATION.md#fairness-metrics-and-phase-12-wrappers).
 
 The Phase 1 hard wrapper uses parity tolerance **0.35**, Phase 2 uses **0.010**, and Phase 3 defaults to **0.05**. The command-line `--parity-tolerance` controls Phase 3 and its sweeps, not the Phase 1/2 constants.
 
@@ -578,8 +580,10 @@ Main phase aggregate CSVs use multiple header rows to group `mean` and `std` und
 | `reward_per_cost` | Successful repayments ÷ total amount lent; multiply by 10,000 to express successes per 10,000 units. It is not a profit or repayment percentage. |
 | `budget_utilization` | In Phases 1–2, spending ÷ starting budget. In sweep summaries, `(initial capital − final cash) / initial capital`; use turnover to measure repeated lending. |
 | `pending_feedback` | Phase 2 outcomes still unavailable to the learner; Phase 1 has immediate feedback. |
-| `funded_G`, `opportunities_G` | Loans and affordable opportunities for audit group G. |
-| `allocation_share_G`, `funding_rate_G`, `quota_deficit_G` | Per-group versions of the fairness measures above, where exported. |
+| `funded_G`, `opportunities_G`, `population_opportunities_G` | Loans, affordable opportunities and all arriving opportunities for group G. Phase 1 uses affordable group-rounds and has no applicant population column. Missing counts are zero. |
+| `allocation_share_G`, `funding_rate_G`, `population_funding_rate_G`, `quota_deficit_G` | Per-group measures. Applicant funding rates are blank when the corresponding opportunity count is zero. |
+| `allocation_share_gap`, `feasible_dp_gap`, `population_dp_gap` | The explicitly named gaps. `demographic_parity_gap` is a compatibility alias for the Phase 1 allocation-share gap or the feasible gap in Phases 2–3. |
+| `feasible_dp_groups`, `population_dp_groups` | Number of groups with a positive denominator in each applicant parity comparison. |
 
 `mean` is the average of episode values. `std` is sample standard deviation across seeds, describing variation, not a confidence interval. A reported `349.9 ± 13.02` successful repayments is an average ± standard deviation; individual episodes have integer successes. For one seed the reporting code fills undefined aggregate standard deviation with zero. Ratios are calculated per episode and then averaged, so an average ratio need not equal a ratio of averages.
 
@@ -602,7 +606,7 @@ Main phase aggregate CSVs use multiple header rows to group `mean` and `std` und
 | `observed_repayment_rate` | Success rate among matured loans only. |
 | `recent_repayment_rate` | Success rate among the latest 30 observed outcomes. Both observed-rate fields use 0.5 before any outcomes arrive. |
 | `lambda_quota`, `lambda_parity` | Current Lagrangian penalty weights; episode summaries use `_final` suffixes. |
-| `state_bucket` | Reporting label for cash, parity, recent repayment, and quota-deficit bands; not a learned value table. |
+| `state_bucket` | Reporting label for cash, parity, recent repayment and quota-deficit bands. `FNA` indicates undefined feasible parity. |
 
 For example, `B1-F0-R2-Q0` means cash is 20%–55% of initial capital, parity is within tolerance, recent repayment rate is at least 75%, and total quota deficit is at most 0.01. The other cash cutoffs are 20%/55%; parity bands use tolerance/twice tolerance; repayment cutoffs are 55%/75%; quota cutoffs are 0.01/0.10.
 
@@ -610,17 +614,11 @@ Timing matters: the final Phase 3 trajectory row is recorded **before** the last
 
 ### Ranking and sweep diagnostics
 
-For Modes 2–3, `rank_results()` first checks whether the **mean** parity gap is within the mode's tolerance and the **mean** total quota deficit is at most 0.01. It then orders policies by:
+Episode summaries record `parity_satisfied`, `quota_satisfied` and `constraint_satisfied`, with population parity and joint outcomes in separate `population_` fields. Parity and joint outcomes are blank when parity is undefined. Aggregate satisfaction rates divide the number of passes by all episodes. Evaluable episode counts and mean gaps are reported separately.
 
-1. Fairness-feasible policies first.
-2. Within feasible policies: higher reward per cost, then higher cumulative reward.
-3. Within infeasible policies: smaller combined parity/quota excess, then reward efficiency and reward.
+Modes 2–3 rank by feasible-opportunity joint satisfaction rate. For policies with incomplete compliance, mean threshold excess breaks ties, followed by reward per cost and cumulative reward. In these rankings, `fairness_feasible` indicates full observed joint compliance, while `mean_thresholds_met` describes the mean-based check. Mode 1 orders policies by mean cumulative reward.
 
-`parity_excess` and `quota_excess` are positive amounts beyond the thresholds; `fairness_violation` sums them. `fairness_feasible` indicates passing these aggregate checks. It does not mean every seed or every round passes. If nobody qualifies, the first-ranked policy is labelled the best compromise. Mode 1's aggregate table instead sorts by mean cumulative reward.
-
-Sweep `constraint_satisfied` checks an individual episode's final thresholds. `constraint_violation` measures the final excess; `fairness_violations` counts recorded rounds outside thresholds. `sweep_value` is the tested value, interpreted using `parameter_kind`. Sweep `cumulative_immediate_reward` is an alias for reward **observed by the horizon**, despite its name; `eventual_cumulative_reward` includes pending outcomes. `recycled_capital` and `final_remaining_capital` alias returned cash and final available cash.
-
-Sweep opportunity-feasibility diagnostics screen whether observed opportunity counts can support the constraints. A screened-feasible episode with violations is classified separately from an opportunity-count-infeasible episode. This is an opportunity-count screen, not proof that all constraints could have been achieved throughout the full cash-and-time trajectory.
+The sweep fields `quota_feasible` and `parity_feasible` screen individual constraints using feasible-opportunity counts at the observed funded volume. `opportunity_screens_passed` combines the two screen results. `feasibility_status` distinguishes screen failure, undefined parity, actual compliance and a policy violation after both screens passed. Passing both screens leaves joint feasibility and the effects of cash, costs, batch size, repayment delays and arrival timing unresolved. `fairness_violations` counts logged rounds with a known threshold breach.
 
 Compare policies within the same phase and configuration. Phase 1 uses a different cost scale, Phase 2 has a one-use budget, and Phase 3 recycles capital. A raw reward-per-cost value or rank across those phases is not an overall league table.
 

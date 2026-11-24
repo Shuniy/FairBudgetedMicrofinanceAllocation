@@ -16,7 +16,6 @@ class BorrowerFeatureEncoder:
         self.region_types = tuple(RegionType)
         names = [
             "intercept",
-            "age_scaled",
             "log_income_scaled",
             "loan_amount_scaled",
             "loan_to_income",
@@ -26,9 +25,10 @@ class BorrowerFeatureEncoder:
             "repeated_borrower",
             "urgent_need",
             "dependants_scaled",
-            "poverty_relief_score",
-            "vulnerability_score",
         ]
+        if include_protected_attributes:
+            names.insert(1, "age_scaled")
+            names += ["poverty_relief_score", "vulnerability_score"]
         names += [f"sector={value.value}" for value in self.sectors]
         names += [f"purpose={value.value}" for value in self.purposes]
         names += [f"region_type={value.value}" for value in self.region_types]
@@ -53,7 +53,6 @@ class BorrowerFeatureEncoder:
         debt = application.existing_debt
         values: list[float] = [
             1.0,
-            float(np.clip((application.age - 18) / 62.0, 0.0, 1.0)),
             float(np.clip(np.log1p(income) / np.log1p(200_000.0), 0.0, 1.0)),
             float(np.clip(loan / 50_000.0, 0.0, 1.0)),
             float(np.clip(loan / income, 0.0, 2.0) / 2.0),
@@ -63,9 +62,10 @@ class BorrowerFeatureEncoder:
             float(application.repeated_borrower),
             float(application.urgent_need),
             float(np.clip(application.dependants / 8.0, 0.0, 1.0)),
-            borrower.poverty_relief_score,
-            borrower.vulnerability_score,
         ]
+        if self.include_protected_attributes:
+            values.insert(1, float(np.clip((application.age - 18) / 62.0, 0.0, 1.0)))
+            values.extend([borrower.poverty_relief_score, borrower.vulnerability_score])
         values.extend(float(application.sector == value) for value in self.sectors)
         values.extend(
             float(application.loan_purpose == value) for value in self.purposes

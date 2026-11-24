@@ -33,6 +33,7 @@ class StepResult:
     done: bool
     true_repayment_probability: float | None = None
     metadata: Mapping[str, Any] = field(default_factory=dict)
+    population_opportunity_counts: Mapping[str, int] = field(default_factory=dict)
 
 
 @dataclass(frozen=True, slots=True)

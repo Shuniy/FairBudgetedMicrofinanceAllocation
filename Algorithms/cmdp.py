@@ -7,7 +7,7 @@ import numpy as np
 
 from Algorithms.contextual import LinearRidgeModel
 from Environments.cmdp_environment import StatefulMicrofinanceCMDPEnv
-from metrics import demographic_parity_gap, total_quota_deficit
+from metrics import demographic_parity_gap, group_funding_rates, total_quota_deficit
 from models.fairness_config import LagrangianConfig
 
 
@@ -377,12 +377,10 @@ class HardFairCMDPPolicy(CMDPPolicy):
             if restricted:
                 return self.base_policy.select_action(env, restricted)
 
-        rates = {
-            group: env.group_funding_counts.get(group, 0)
-            / max(1, env.group_opportunity_counts.get(group, 0))
-            for group in env.group_opportunity_counts
-        }
-        if rates:
+        rates = group_funding_rates(
+            env.group_funding_counts, env.group_opportunity_counts
+        )
+        if len(rates) >= 2:
             gap = max(rates.values()) - min(rates.values())
             if gap > self.parity_tolerance:
                 minimum = min(rates.values())
@@ -490,12 +488,13 @@ class LagrangianFairCMDPPolicy(CMDPPolicy):
                 self.config.max_lambda,
             )
         )
-        self.lambda_parity = float(
-            np.clip(
-                self.lambda_parity
-                + rate * (parity_gap - self.config.parity_tolerance),
-                0.0,
-                self.config.max_lambda,
+        if not np.isnan(parity_gap):
+            self.lambda_parity = float(
+                np.clip(
+                    self.lambda_parity
+                    + rate * (parity_gap - self.config.parity_tolerance),
+                    0.0,
+                    self.config.max_lambda,
+                )
             )
-        )
         self.lambda_history.append((self.lambda_quota, self.lambda_parity))
