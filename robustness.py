@@ -294,7 +294,6 @@ AGGREGATE_METRICS = (
     "total_quota_deficit",
     "fairness_violations",
     "constraint_violation",
-    "constraint_satisfied",
     "quota_feasible",
     "parity_feasible",
     "fairness_feasible",
@@ -602,6 +601,17 @@ def build_sweep_summary(
     return tuple(statements)
 
 
+BASELINE_REQUIRED_FAIRNESS_FIELDS = (
+    "feasible_dp_gap",
+    "population_dp_gap",
+    "feasible_dp_groups",
+    "population_dp_groups",
+    "parity_evaluable",
+    "population_parity_evaluable",
+    *CONSTRAINT_RATE_FIELDS.values(),
+)
+
+
 BASELINE_COMPARISON_METRICS = (
     "loans_funded",
     "cumulative_reward",
@@ -614,9 +624,7 @@ BASELINE_COMPARISON_METRICS = (
     "final_capital_at_risk",
     "eventual_terminal_capital",
     "demographic_parity_gap",
-    "population_dp_gap",
-    "population_dp_groups",
-    "feasible_dp_groups",
+    *BASELINE_REQUIRED_FAIRNESS_FIELDS,
     "quota_satisfaction_rate",
     "total_quota_deficit",
     "lambda_quota_final",
@@ -629,22 +637,38 @@ def _baseline_frames_match(
     candidate: pd.DataFrame,
 ) -> tuple[bool, list[str]]:
     keys = ["policy", "seed"]
-    reference = reference.sort_values(keys).reset_index(drop=True)
-    candidate = candidate.sort_values(keys).reset_index(drop=True)
+    reference = reference.set_index(keys).sort_index()
+    candidate = candidate.set_index(keys).sort_index()
     errors: list[str] = []
-    reference_keys = set(map(tuple, reference[keys].itertuples(index=False, name=None)))
-    candidate_keys = set(map(tuple, candidate[keys].itertuples(index=False, name=None)))
-    if reference_keys != candidate_keys:
+    for label, frame in (("reference", reference), ("candidate", candidate)):
+        if frame.index.has_duplicates:
+            errors.append(f"duplicate policy/seed rows in {label}")
+        missing = [field for field in BASELINE_REQUIRED_FAIRNESS_FIELDS if field not in frame]
+        if missing:
+            errors.append(f"{label} missing required fairness fields: {', '.join(missing)}")
+    if not reference.index.equals(candidate.index):
         errors.append("policy/seed rows differ")
+    if errors:
         return False, errors
+
     metrics = [
         metric
         for metric in BASELINE_COMPARISON_METRICS
         if metric in reference and metric in candidate
     ]
+    count_columns = [
+        column for column in reference.columns.union(candidate.columns)
+        if column.startswith(FAIRNESS_COUNT_PREFIXES)
+    ]
+    metrics.extend(count_columns)
+    reference = reference.reindex(columns=metrics, fill_value=0)
+    candidate = candidate.reindex(columns=metrics, fill_value=0)
     for metric in metrics:
-        left = pd.to_numeric(reference[metric], errors="coerce").to_numpy()
-        right = pd.to_numeric(candidate[metric], errors="coerce").to_numpy()
+        left, right = reference[metric], candidate[metric]
+        if metric in count_columns:
+            left, right = left.fillna(0), right.fillna(0)
+        left = pd.to_numeric(left, errors="coerce").to_numpy(dtype=float, na_value=np.nan)
+        right = pd.to_numeric(right, errors="coerce").to_numpy(dtype=float, na_value=np.nan)
         if not np.allclose(left, right, rtol=0.0, atol=1e-12, equal_nan=True):
             errors.append(metric)
     return not errors, errors

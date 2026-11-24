@@ -477,7 +477,9 @@ flowchart TD
     G --> H["validate_mode4_baselines() → save_mode4_report()"]
 ```
 
-There is no new learner here: each case reuses the Phase 3 loop. Extra fields such as `sweep_value`, `parameter_kind`, and `is_baseline` say which setting generated a row. Baseline validation checks shared reference settings across the sweeps for consistency.
+There is no new learner here: each case reuses the Phase 3 loop. Extra fields such as `sweep_value`, `parameter_kind`, and `is_baseline` say which setting generated a row. Baseline validation matches one row per policy and seed across shared reference settings. It also compares feasible and population parity gaps and group counts, episode-level compliance outcomes, and funding and opportunity counts by group. Historical results missing required fairness fields fail validation.
+
+Sweep aggregates report feasible joint constraint satisfaction as `constraint_satisfaction_rate`. Feasible joint, population parity, and population joint rates divide successful episodes by all evaluated episodes. Undefined parity and joint outcomes stay blank in the raw CSV, and the aggregate CSV records how many episodes had evaluable parity.
 
 The supplied [budget summary](outputs/cmdp_robustness/sweeps/budget/summary.json) records 183 of 600 episodes satisfying both final fairness thresholds; the [group-imbalance summary](outputs/cmdp_robustness/sweeps/group_imbalance/summary.json) records 125 of 600; the [fairness-strength summary](outputs/cmdp_robustness/sweeps/fairness_strength/summary.json) records 189 of 360. These are counts across the policies, settings, and seeds in each sweep, not success rates for an individual algorithm. All three hard-policy families maintained mean quota satisfaction 1.0 at all five budget settings, but that alone does not establish parity compliance.
 
